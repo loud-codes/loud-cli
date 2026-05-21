@@ -22,13 +22,16 @@ Web dev · scraping · ops. Tus tools, tu máquina, tu control.
 
 ---
 
+> ⚠️ **Privado / sólo por invitación.** LOUD no es un servicio público.
+> Instalar el CLI es gratis, pero para usarlo necesitas credenciales emitidas
+> por un admin de LOUD. Sin cuenta, `loud login` falla.
+
 ## ¿Qué es LOUD?
 
 LOUD es un agente AI privado que corres desde tu terminal. Se conecta a un backend
-de inferencia hosted (corre un LLM open-source grande) y ejecuta tools
+de inferencia hosted (corre un LLM open-source en infra dedicada) y ejecuta tools
 **localmente en tu máquina** — entonces puede leer tus archivos, correr tus
-scripts, hacer SSH a tus servidores y escribir código. Misma UX que las
-herramientas AI que usas, pero tú controlas el modelo y los datos.
+scripts, hacer SSH a tus servidores y escribir código.
 
 Viene especializada en:
 
