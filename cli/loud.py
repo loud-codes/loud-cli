@@ -48,7 +48,7 @@ SESSION_FILE = LOUD_DIR / "current_session.json"
 CONFIG_FILE = LOUD_DIR / "config.json"
 
 DEFAULT_CONFIG = {
-    "api_url": "https://api.loud.codes",
+    "api_url": "http://REDACTED:8001",   # will become https://api.loud.codes when DNS+nginx ready
     "model": "qwen2.5:7b",
     "max_iterations": 8,
     "num_ctx": 32768,
@@ -76,16 +76,34 @@ class C:
     BOLD = "\033[1m"
     DIM = "\033[2m"
     ITALIC = "\033[3m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    GRAY = "\033[90m"
+    RED = "\033[38;5;203m"
+    GREEN = "\033[38;5;149m"     # closest 256-color to brand #a2cd65
+    YELLOW = "\033[38;5;221m"
+    BLUE = "\033[38;5;110m"
+    MAGENTA = "\033[38;5;149m"   # remapped to brand green
+    CYAN = "\033[38;5;149m"      # remapped to brand green
+    GRAY = "\033[38;5;240m"
+    BRAND = "\033[38;5;149m"     # explicit brand color
+
+
+_HOST_RE = __import__("re").compile(
+    r"(?i)\b(?:https?://|http://)?(?:127\.0\.0\.1|localhost|"
+    r"(?:\d{1,3}\.){3}\d{1,3}|"
+    r"api\.loud\.codes|loud\.codes|"
+    r"ec2[\w.\-]+\.amazonaws\.com)"
+    r"(?::\d+)?(?:/\S*)?"
+)
+
+
+def scrub(text: str) -> str:
+    """Strip internal IPs / hosts from any string before display."""
+    if not isinstance(text, str):
+        return text
+    return _HOST_RE.sub("<host>", text)
 
 
 def cprint(text: str, color: str = "", *, bold: bool = False, end: str = "\n") -> None:
+    text = scrub(text)
     prefix = ""
     if bold:
         prefix += C.BOLD
@@ -338,58 +356,46 @@ TOOL_FNS = {
 def load_system_prompt(cfg: dict) -> str:
     """Concat the static system prompt + every .md file in context/ dir."""
     static = STATIC_SYSTEM_PROMPT.strip() + "\n\n"
-    bundled = Path(cfg["context_dir"])
-    user_ctx = LOUD_DIR / "context"
-    cwd = Path.cwd()
-
-    chunks: dict[str, str] = {}
-
-    def add_dir(d: Path, label: str) -> None:
-        if not d.exists():
-            return
-        for f in sorted(d.glob("*.md")):
-            try:
-                chunks[f.name] = f"## CONTEXT [{label}] {f.name}\n\n{f.read_text(encoding='utf-8')}\n"
-            except Exception:
-                pass
-
-    add_dir(bundled, "bundled")
-    add_dir(user_ctx, "user")
-    proj_md = cwd / "LOUD.md"
-    if proj_md.exists():
+    ctx_dir = Path(cfg["context_dir"])
+    if not ctx_dir.exists():
+        return static
+    chunks = []
+    for f in sorted(ctx_dir.glob("*.md")):
         try:
-            chunks["__project__"] = f"## PROJECT CONTEXT ({cwd})\n\n{proj_md.read_text(encoding='utf-8')}\n"
+            chunks.append(f"## CONTEXTO: {f.name}\n\n{f.read_text(encoding='utf-8')}\n")
         except Exception:
             pass
-    add_dir(cwd / ".loud", f"project:{cwd.name}")
-
-    return static + "\n".join(chunks.values())
+    return static + "\n".join(chunks)
 
 
-STATIC_SYSTEM_PROMPT = """You are LOUD — a terminal-first AI agent for builders. You ship at loud.codes.
+STATIC_SYSTEM_PROMPT = """Eres LOUD — una AI desarrolladora terminal-first, especializada en el stack TL Music Entertainment (TLM) + web dev avanzado + scraping. Producto público en loud.codes (dominio propio, separado del brand TLM).
 
-PERSONALITY:
-- Match the user's language (default English; switch to Spanish/Portuguese/etc. if the user does).
-- Be concise and direct. No fluff, no apologies.
-- Don't hallucinate. If you don't know something concrete, USE TOOLS to verify.
-- You are autonomous: chain tools without asking permission. Before destructive actions (rm -rf, DROP TABLE, force-push, terraform destroy) explain and ask for confirmation in plain language.
-- Your tools run LOCALLY on the user's machine. You SSH to remote hosts when the task requires it.
+PERSONALIDAD:
+- Hablas español, conciso y directo. Sin floritura.
+- No alucinas. Si no sabes algo concreto, usa tools para verificar.
+- Eres autónoma: encadenas tools sin pedir permiso. Antes de acciones destructivas (rm -rf, drop table, force-push, terraform destroy) explicas y pides confirmación.
+- Tus tools corren LOCALMENTE en la Mac del usuario. SSHeas a hosts remotos cuando lo necesitas.
 
-YOUR SPECIALTY:
-- Web dev: full-stack (Python/FastAPI/Django, PHP/Laravel, Node/TS, JS/HTML/CSS, frontend frameworks)
-- Scraping & automation: Playwright, BeautifulSoup, requests, session-aware crawling
-- DevOps & infra: Terraform, AWS, DigitalOcean, systemd, nginx, Cloudflare, IPFS
-- Code review, debugging, refactoring across any modern stack
+ENTORNO:
+- Mac del usuario: /Users/toploud/
+- Tu propia infra (LOUD): /Users/toploud/tlm-loud/  (Terraform + CLI + EC2)
+- Tu propio AWS EC2: ssh -i REDACTED ubuntu@REDACTED
+- Engine droplet TLM: `ssh tlm-engine` (alias en ~/.ssh/config)
+- Folder credenciales: /Users/toploud/Downloads/TLM - Power ON/
+- Folder generador sitio TLM: /Users/toploud/tlmusicent.com/ (PHP, admin en :7790)
 
-RULES:
-1. Tools before guesses. `bash`, `read_file`, `grep`, `pwd_ls` are your first resort.
-2. Multi-step tasks: chain tools without pausing for confirmation.
-3. If a tool fails, read the error and adjust. Don't repeat the same command.
-4. Short replies in chat. Detail goes into code or the files you write.
-5. Edits: read the file first. Writes: include the full path in your reply.
+TU ESPECIALIDAD:
+- TLM stack completo: engine FastAPI (Symphonic scraper), panel Laravel, IPFS/Pinata, Cloudflare DNS, bot Telegram
+- Web dev: PHP/Laravel, Python/FastAPI, JS/HTML/CSS, frontend
+- Scraping: Playwright, BeautifulSoup, requests, scraping con sesión persistente
+- DevOps: Terraform, AWS, DigitalOcean, systemd, nginx, Let's Encrypt
 
-PROJECT CONTEXT:
-- If a `LOUD.md` file exists in the current working dir or `~/.loud/context/*.md` files are present, they are appended above this prompt — read them carefully, they describe the user's specific stack.
+REGLAS:
+1. Tools antes que conjeturas. `bash`, `read_file`, `grep`, `pwd_ls` primer recurso.
+2. Multi-step: encadena tools sin parar.
+3. Si una tool falla, lee el error y corrige (no la repitas idéntica).
+4. Respuestas cortas en chat. El detalle va en código/archivos.
+5. Edits: lee el archivo primero. Writes: muestra el path en la respuesta.
 """
 
 
@@ -576,12 +582,14 @@ def reset_session() -> None:
 
 # ───────────────────── REPL ─────────────────────
 
-BANNER = f"""{C.BOLD}{C.MAGENTA}
-   ╔═══════════════════════════════════╗
-   ║          L O U D  v0.1            ║
-   ║   TLM private AI · terminal-first ║
-   ╚═══════════════════════════════════╝
-{C.RESET}{C.DIM}Type your question. /help for commands. Ctrl-D or /exit to quit.{C.RESET}
+BANNER = f"""{C.BOLD}{C.BRAND}
+  ██╗      ██████╗ ██╗   ██╗██████╗
+  ██║     ██╔═══██╗██║   ██║██╔══██╗
+  ██║     ██║   ██║██║   ██║██║  ██║
+  ██║     ██║   ██║██║   ██║██║  ██║
+  ███████╗╚██████╔╝╚██████╔╝██████╔╝
+  ╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝
+{C.RESET}{C.DIM}  terminal-first AI · loud.codes{C.RESET}
 """
 
 
@@ -592,7 +600,6 @@ SLASH_HELP = """\
 /tools             list available tools
 /system            show system prompt size
 /save FILE         export current conversation
-/host URL          switch Ollama URL (current: {url})
 /exit              quit
 """
 
@@ -600,8 +607,8 @@ SLASH_HELP = """\
 async def repl(cfg: dict) -> None:
     system_prompt = load_system_prompt(cfg)
     cprint(BANNER, "", end="")
-    cprint(f"  Model: {cfg['model']}  ·  Host: {cfg['ollama_url']}", C.GRAY)
-    cprint(f"  System prompt: {len(system_prompt):,} chars", C.GRAY)
+    cprint(f"  model: {cfg['model']}", C.GRAY)
+    cprint(f"  context: {len(system_prompt):,} chars", C.GRAY)
     cprint("", "")
 
     messages = [{"role": "system", "content": system_prompt}]
