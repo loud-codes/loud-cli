@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import re
 import shlex
 import shutil
@@ -38,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -568,6 +569,158 @@ def _validate_bash_complexity(cmd: str) -> str | None:
     return None
 
 
+# ── Background job machinery ──
+# LOUD-portable: tasks the user wants left RUNNING (a server, a build, a
+# downloader, a long ngrok tunnel) get their own managed log file under
+# ~/.loud/jobs/. The model gets dedicated tools to start, list, status and
+# stop them without juggling raw nohup syntax.
+
+JOBS_DIR = LOUD_DIR / "jobs"
+
+
+def _jobs_dir() -> Path:
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    return JOBS_DIR
+
+
+def _job_path(label: str) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", label)[:48] or "job"
+    return _jobs_dir() / f"{safe}.log"
+
+
+def _job_meta_path(label: str) -> Path:
+    return _job_path(label).with_suffix(".json")
+
+
+def _is_pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0); return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+async def tool_bash_background(cmd: str, label: str) -> str:
+    """Start a long-running shell command in the BACKGROUND and return
+    immediately with its PID + log path. Use this for servers, watchers,
+    downloaders, ngrok tunnels — anything that doesn't terminate quickly.
+
+    The output goes to ~/.loud/jobs/<label>.log so the model (or the user)
+    can `tail` it later via read_file or bash. Metadata in <label>.json."""
+    if not label or not label.strip():
+        return "ERROR: label requerido (ej: 'http-1002', 'ngrok', 'build')"
+    err = _validate_bash_complexity(cmd)
+    if err: return err
+    log_path = _job_path(label)
+    meta_path = _job_meta_path(label)
+    # `nohup` + setsid keeps the child alive after the CLI exits.
+    full = f"nohup {cmd} > '{log_path}' 2>&1 &"
+    try:
+        proc = subprocess.Popen(
+            _shell_args(full),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        # The Popen pid is the shell wrapper; the actual child runs detached.
+        # Best-effort: poll `ps` for the most recent matching command to find
+        # the real PID. Keep it simple: store both.
+        await asyncio.sleep(0.4)
+        wrapper_pid = proc.pid
+        meta = {
+            "label": label,
+            "cmd": cmd,
+            "log": str(log_path),
+            "wrapper_pid": wrapper_pid,
+            "started_at": time.time(),
+        }
+        meta_path.write_text(json.dumps(meta, indent=2))
+        # Read a quick first slice of the log so the model sees early output.
+        await asyncio.sleep(0.6)
+        early = ""
+        try: early = log_path.read_text()[:1200]
+        except Exception: pass
+        return (
+            f"job '{label}' started\n"
+            f"  cmd: {cmd}\n"
+            f"  log: {log_path}\n"
+            f"  pid (wrapper): {wrapper_pid}\n"
+            f"  early output:\n{early or '(nothing yet)'}"
+        )
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_job_status(label: str, tail_lines: int = 40) -> str:
+    """Inspect a background job started by bash_background. Shows whether the
+    process is still alive plus the last N lines of its log."""
+    meta_path = _job_meta_path(label)
+    log_path = _job_path(label)
+    if not meta_path.exists():
+        return f"ERROR: no hay job con label '{label}'. Usa job_list para ver los disponibles."
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception:
+        meta = {}
+    age = time.time() - meta.get("started_at", time.time())
+    wrapper_alive = _is_pid_running(meta.get("wrapper_pid", -1))
+    tail = ""
+    if log_path.exists():
+        try:
+            lines = log_path.read_text().splitlines()
+            tail = "\n".join(lines[-tail_lines:])
+        except Exception as e:
+            tail = f"(no pude leer log: {e})"
+    return (
+        f"job '{label}': {'alive' if wrapper_alive else 'exited'} · "
+        f"{int(age)}s desde start\n"
+        f"  cmd: {meta.get('cmd','?')}\n"
+        f"  log: {log_path}\n"
+        f"  last {tail_lines} líneas:\n{tail or '(log vacío)'}"
+    )
+
+
+async def tool_job_list() -> str:
+    """List all background jobs LOUD has started (alive + exited)."""
+    d = _jobs_dir()
+    metas = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not metas:
+        return "(no hay background jobs)"
+    rows = []
+    for m in metas:
+        try: meta = json.loads(m.read_text())
+        except Exception: continue
+        alive = _is_pid_running(meta.get("wrapper_pid", -1))
+        age = int(time.time() - meta.get("started_at", time.time()))
+        rows.append(f"  {'●' if alive else '○'} {meta.get('label','?'):20s} {age:5d}s  {meta.get('cmd','')[:80]}")
+    return "background jobs:\n" + "\n".join(rows)
+
+
+async def tool_job_stop(label: str) -> str:
+    """Kill a background job by label. Uses the process group so the entire
+    subprocess tree dies (helpful for ngrok / python -m http.server)."""
+    meta_path = _job_meta_path(label)
+    if not meta_path.exists():
+        return f"ERROR: no hay job con label '{label}'"
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception:
+        return "ERROR: meta corrupto"
+    pid = int(meta.get("wrapper_pid", -1))
+    if pid <= 0 or not _is_pid_running(pid):
+        return f"job '{label}' ya estaba detenido"
+    try:
+        # Kill the whole process group started with start_new_session=True
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        await asyncio.sleep(0.3)
+        if _is_pid_running(pid):
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        return f"job '{label}' detenido (pid {pid})"
+    except (ProcessLookupError, PermissionError):
+        return f"job '{label}': pid {pid} ya no responde"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
 async def tool_bash(cmd: str, timeout: int = 120) -> str:
     # Step-gating: refuse megachains so the model is forced to decompose.
     err = _validate_bash_complexity(cmd)
@@ -780,19 +933,51 @@ TOOLS_SCHEMA = [
         "description": "Fetch the body of an HTTP/HTTPS URL.",
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     }},
+    {"type": "function", "function": {
+        "name": "bash_background",
+        "description": "Start a LONG-RUNNING shell command in the BACKGROUND. Use this for servers, watchers, downloaders, ngrok tunnels — anything that doesn't terminate quickly. Returns the PID + log path immediately. The job keeps running after this tool returns. NEVER use bash() with `&` for servers — it hangs the CLI; use this instead. `label` must be a short identifier (eg 'http-1002', 'ngrok').",
+        "parameters": {"type": "object", "properties": {
+            "cmd":   {"type": "string", "description": "Command to run in background (no need to add nohup/&; the tool handles that)."},
+            "label": {"type": "string", "description": "Short identifier for this job (alphanumeric/_/-)."}
+        }, "required": ["cmd", "label"]},
+    }},
+    {"type": "function", "function": {
+        "name": "job_status",
+        "description": "Check whether a background job is still alive + the last N lines of its log.",
+        "parameters": {"type": "object", "properties": {
+            "label":      {"type": "string"},
+            "tail_lines": {"type": "integer", "description": "How many log lines to return (default 40)."},
+        }, "required": ["label"]},
+    }},
+    {"type": "function", "function": {
+        "name": "job_list",
+        "description": "List all background jobs LOUD started (alive + exited).",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "job_stop",
+        "description": "Kill a background job by label. Sends SIGTERM to the whole process group.",
+        "parameters": {"type": "object", "properties": {
+            "label": {"type": "string"},
+        }, "required": ["label"]},
+    }},
 ]
 
 
 TOOL_FNS = {
-    "bash":       tool_bash,
-    "ssh":        tool_ssh,
-    "read_file":  tool_read_file,
-    "write_file": tool_write_file,
-    "edit_file":  tool_edit_file,
-    "glob":       tool_glob,
-    "grep":       tool_grep,
-    "ls":         tool_ls,
-    "http_get":   tool_http_get,
+    "bash":            tool_bash,
+    "bash_background": tool_bash_background,
+    "job_status":      tool_job_status,
+    "job_list":        tool_job_list,
+    "job_stop":        tool_job_stop,
+    "ssh":             tool_ssh,
+    "read_file":       tool_read_file,
+    "write_file":      tool_write_file,
+    "edit_file":       tool_edit_file,
+    "glob":            tool_glob,
+    "grep":            tool_grep,
+    "ls":              tool_ls,
+    "http_get":        tool_http_get,
 }
 
 
@@ -906,6 +1091,32 @@ Si el pedido tiene ≥3 acciones (instalar X, arrancar Y, exponer Z):
 3. Después del resultado decidís el siguiente.
 
 NUNCA intentes "hacer todo de un solo embriónazo". Pasitos chicos, observación entre cada uno. Esa es la diferencia entre un asistente real y un script roto que se cae al primer error.
+
+## 4d. NO TE DETENGAS HASTA TERMINAR LA TAREA
+Crítico. Una vez que arrancaste un plan, tu obligación es completarlo. Cada turno tuyo es uno de estos:
+- Tool call que avanza al siguiente paso del plan, O
+- Mensaje final breve ("listo, X creado, Y arriba en URL Z, verificación pasó").
+
+NO existe el "ya te dejo aquí para que sigas vos" en medio de una tarea técnica. Si llegaste a 80% no le digas al usuario "ahora podés correr el último paso" — corré vos el último paso. Si una tool falla, NO termines con "intentá tú"; ajustás y reintentás con corrección. La única forma legítima de terminar antes del goal es:
+- El usuario corrige a media tarea (entonces seguís lo nuevo).
+- Un permiso fue denegado y no hay alternativa.
+- El error es estructural (paquete no existe en este OS, etc.) — entonces decilo claro y proponé alternativa.
+
+Si una iteración devuelve solo prosa sin tool call, eso es un BUG tuyo — el agente loop te va a re-llamar; usa ese turno para hacer la siguiente tool concreta.
+
+## 4e. TAREAS LARGAS — corré en background y mantené el hilo
+Para cualquier cosa que tarde más de ~10 segundos en producir resultado (servidores HTTP, ngrok, builds, watchers, downloaders, ML training, syncs grandes): NO uses `bash` con `&` — eso cuelga el CLI. Usá `bash_background(cmd, label)` que:
+- Lanza el proceso desprendido (sigue vivo cuando salgas de loud)
+- Devuelve PID + path del log al toque
+- Te deja consultar con `job_status(label)` cuántas líneas de log salieron, si sigue vivo, qué dijo
+- Y matar con `job_stop(label)` cuando quieras
+
+Patrón:
+1. `bash_background("python3 -m http.server 1002 --directory /tmp/x", label="http-1002")` → devuelve PID + early output
+2. *Esperás 1-2 turnos.* Si necesitás verificar: `bash("curl -fsSL http://127.0.0.1:1002/")` o `job_status("http-1002", tail_lines=20)`
+3. Cuando el usuario quiera pararlo: `job_stop("http-1002")`
+
+Esto es lo que hace que LOUD-portable jale verdadero peso local: tareas pesadas viven en TU máquina, no se pierde el hilo aunque cierres el chat.
 
 ## 5. Si una tool falla, leé el error y CORREGÍ
 Nunca repitas el mismo comando idéntico esperando otro resultado. Lee `stderr`/error, ajustá los argumentos, intentá una alternativa. Si una ruta no existe, `ls` el directorio padre. Si un paquete falta, instalalo primero.
@@ -1612,29 +1823,37 @@ _LOADING_VERBS = [
     "Vibesynthing",    # vibras
 ]
 _TOOL_LABEL = {
-    "bash":       "Bashing",
-    "ssh":        "Tunneling",
-    "read_file":  "Reading",
-    "write_file": "Writing",
-    "edit_file":  "Updating",
-    "glob":       "Globbing",
-    "grep":       "Searching",
-    "ls":         "Listing",
-    "http_get":   "Fetching",
+    "bash":            "Bashing",
+    "bash_background": "Backgrounding",
+    "job_status":      "Inspecting",
+    "job_list":        "Listing-jobs",
+    "job_stop":        "Stopping",
+    "ssh":             "Tunneling",
+    "read_file":       "Reading",
+    "write_file":      "Writing",
+    "edit_file":       "Updating",
+    "glob":            "Globbing",
+    "grep":            "Searching",
+    "ls":              "Listing",
+    "http_get":        "Fetching",
 }
 
 # Pretty display names for the "● Tool(args)" call header — matches the
 # Claude-Code style. Falls back to the raw tool name when not in this map.
 _TOOL_DISPLAY = {
-    "bash":       "Bash",
-    "ssh":        "SSH",
-    "read_file":  "Read",
-    "write_file": "Write",
-    "edit_file":  "Update",
-    "glob":       "Glob",
-    "grep":       "Search",
-    "ls":         "List",
-    "http_get":   "Fetch",
+    "bash":            "Bash",
+    "bash_background": "Background",
+    "job_status":      "JobStatus",
+    "job_list":        "JobList",
+    "job_stop":        "JobStop",
+    "ssh":             "SSH",
+    "read_file":       "Read",
+    "write_file":      "Write",
+    "edit_file":       "Update",
+    "glob":            "Glob",
+    "grep":            "Search",
+    "ls":              "List",
+    "http_get":        "Fetch",
 }
 
 
@@ -1644,6 +1863,12 @@ def _format_tool_call_header(name: str, args: dict) -> str:
     display = _TOOL_DISPLAY.get(name, name.capitalize())
     if name == "bash":
         arg_str = (args.get("cmd") or "").strip().replace("\n", " ⏎ ")
+    elif name == "bash_background":
+        arg_str = f"{args.get('label','?')} → {(args.get('cmd') or '').strip()}"
+    elif name in ("job_status", "job_stop"):
+        arg_str = args.get("label", "?")
+    elif name == "job_list":
+        arg_str = ""
     elif name == "ssh":
         arg_str = f"{args.get('host','?')}: {(args.get('cmd') or '').strip()}"
     elif name in ("read_file", "write_file", "edit_file"):
