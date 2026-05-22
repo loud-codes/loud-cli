@@ -189,15 +189,23 @@ State lives in:
 
 ## Models
 
-The CLI exposes three aliases that map to whatever the backend has loaded:
+The CLI exposes a set of aliases that map to whatever the backend has loaded.
+Since **LOUD 2.0** (May 2026) the server runs on an NVIDIA **L40S 48 GB GPU**,
+which unlocks 32B-class models at production latency.
 
 | Alias | Default backing | Use for |
 |---|---|---|
 | **`loud-go`** | qwen2.5:3b | fast chat, quick refactors |
 | **`loud-pro`** | qwen2.5:7b | reasoning, multi-file edits |
 | **`loud-ultra`** | qwen2.5:14b | deep refactors, complex debugging |
+| **`loud-2.0`** ⚡ | qwen2.5:32b | LOUD 2.0 — the new flagship · GPU only |
+| **`loud-eye`** 👁️ | qwen2-vl:7b | screenshots & images (vision) |
 
-Switch with `loud --model loud-pro` or `/model loud-pro` inside the REPL.
+Switch with `loud --model loud-2.0` or `/model loud-2.0` inside the REPL.
+
+> The "loud-2.0" and "loud-eye" aliases require the GPU backend. If you're
+> running the CLI against a CPU-only LOUD server, only the first three are
+> available.
 
 ---
 
@@ -213,11 +221,42 @@ Switch with `loud --model loud-pro` or `/model loud-pro` inside the REPL.
 
 ## Self-update
 
+The CLI keeps itself up to date — **no need to uninstall and reinstall**.
+
 ```bash
-loud update
+loud update         # check + install the latest version
 ```
 
-The CLI detects how you installed it (Homebrew, curl-installer, git clone) and re-runs the right path. There's also a quiet daily check — if a newer version is available, the welcome banner shows `↑ nueva versión disponible: X — corre 'loud update'`.
+Or from inside the REPL:
+
+```
+loud❯ /update
+```
+
+What it does:
+- Detects how you installed it (Homebrew · curl-installer · git clone · Windows ps1)
+- Re-runs the right updater path
+- Preserves your `~/.loud/` config, sessions, and permissions
+- Survives all your settings — only the binary swaps
+
+There's a **quiet daily check** baked in: if a newer release is on `main`,
+the welcome banner shows `↑ nueva versión disponible: X — corre 'loud update'`.
+So you'll always know without polling manually.
+
+### Manual one-liners (if `loud update` ever fails)
+
+```bash
+# macOS · Linux
+curl -fsSL https://loud.codes/install.sh | bash
+
+# macOS Homebrew
+brew update && brew upgrade loud
+
+# Windows
+iwr -useb https://loud.codes/install.ps1 | iex
+```
+
+Your `~/.loud/auth.json` and config persist across updates.
 
 ---
 
@@ -236,12 +275,45 @@ brew uninstall loud
 
 - [x] Streaming responses with typewriter rendering
 - [x] Per-action permission gate with cached "always" decisions
-- [x] Self-update
+- [x] Self-update (`loud update`)
 - [x] Windows + macOS + Linux installers
+- [x] **LOUD 2.0 — GPU backend with NVIDIA L40S 48GB**  *(May 2026)*
+- [x] **`loud-2.0` model (qwen 32B) usable in production**
+- [x] **`loud-eye` vision model — chat with screenshots**
+- [ ] Local model fallback when the LOUD server is unreachable *(WIP)*
+- [ ] Dreamer: autonomous background learning + daily report
 - [ ] Built-in `diff` view for `edit_file` before applying
 - [ ] Multi-file refactor sessions
-- [ ] Local model fallback when the LOUD server is unreachable
 - [ ] Shell completions (zsh / bash / fish / powershell)
+- [ ] Subscriptions + paid tier integration
+
+---
+
+## Changelog
+
+### v0.4.0 — LOUD 2.0 GPU release · 2026-05-22
+
+- 🚀 **Backend migrated to NVIDIA L40S 48 GB GPU** — 3–10× faster across all models
+- ⚡ **New model `loud-2.0`** (qwen 32B) — flagship quality at production speed
+- 👁️ **New model `loud-eye`** — vision (qwen2-vl), drop screenshots into chat
+- 📝 `/update` slash command added inside the REPL
+- 📋 README + roadmap updated with the LOUD 2.0 timeline
+
+### v0.3.0 — Agentic CLI · 2026-05-21
+
+- Streaming chat with token-by-token typewriter rendering
+- Local tool suite: bash · ssh · read_file · write_file · edit_file · glob · grep · ls · http_get
+- Per-action permission system: ask / yolo / safe
+- Welcome banner with status panel (session · model · permissions · cwd · server)
+- First-run setup wizard
+- `loud update` self-updater + daily background check
+- Cross-platform installers (macOS · Linux · Windows)
+
+### v0.1.0 — Initial release · 2026-05-19
+
+- Basic REPL connected to the LOUD API
+- Login / logout / whoami
+- Three model aliases: loud-go · loud-pro · loud-ultra
 
 ---
 
