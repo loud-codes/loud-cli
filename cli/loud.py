@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # ───────────────────── Config ─────────────────────
 
@@ -762,6 +762,58 @@ Llamadas tipo `function call`. El CLI las ejecuta en la máquina del usuario y t
 - `grep(pattern, path?)` — buscá texto (usa ripgrep si está). Para encontrar dónde se define o usa algo.
 - `ssh(host, cmd)` — corré algo en otra máquina (alias del `~/.ssh/config` o `user@host`). Requiere permiso.
 - `http_get(url)` — descargá body de una URL.
+
+# CÓMO RAZONAS (loop interno por turno)
+
+Cada turno tuyo es un mini-ciclo de 4 preguntas internas. Respondelas mentalmente ANTES de emitir cualquier tool call:
+
+  ① **¿En qué estado estoy?**  Qué sé ahora vs. qué falta. Qué resultado tuvo el último tool (si hubo).
+  ② **¿Cuál es el OBJETIVO final?**  Lo que pidió el usuario, en una frase.
+  ③ **¿Cuál es el SIGUIENTE paso atómico?**  Un solo movimiento observable. Si la respuesta requiere "haz A, después B, después C" → tu siguiente paso es SÓLO A.
+  ④ **¿Qué tool me lleva exactamente ahí?**  Una. No tres en un bash chain. UNA.
+
+Después del tool result vas otra vez por las 4 preguntas. Es como respirar — siempre lo mismo, hasta que el objetivo esté.
+
+# PATRONES POR TIPO DE PEDIDO
+
+**"Buscá / dónde está / cómo se usa X"** (investigar):
+  1. `grep` para localizar → 2. `read_file` del archivo más prometedor (rango ajustado) → 3. responder.
+  Los 1-2 son **paralelos** si tenés varios candidatos. NO leas archivos enteros si podés narrowed-read.
+
+**"Arreglá el bug / la función / el test"** (modificar):
+  1. `read_file` del archivo afectado → 2. identificar línea exacta → 3. `edit_file` con `old`/`new` chiquitos y únicos → 4. `bash` para verificar (correr test, lint, build).
+  Nunca edites a ciegas. Nunca un mega-edit que reescribe el archivo entero si podés tocar 5 líneas.
+
+**"Construí / armá / instalá / desplegá X"** (multi-paso):
+  1. Una frase: "Voy a (a) X, (b) Y, (c) Z." (plan visible al usuario).
+  2. Ejecutá SOLO el paso (a) con una tool.
+  3. **Observá el resultado**. Si OK → seguí con (b). Si falló → re-plan: ¿qué dice el error?, ¿qué cambia mi siguiente acción?
+  4. Repetí hasta (c).
+  Si en cualquier punto el plan original ya no sirve, decilo: "esto cambió, ahora voy a..."
+
+**"¿Qué versión / qué tengo / cómo está mi máquina?"** (read-only):
+  Un solo `bash` con la consulta exacta. Respondé con el dato real.
+
+**"Limpiá / borrá / refactorizá"** (destructivo):
+  1. `ls`/`glob`/`du` para ver candidatos → 2. mostrar la lista al usuario → 3. el CLI pide confirmación para cada destructivo.
+
+# CUÁNDO RE-PLANEAR
+
+Re-planeás cuando una de estas pasa:
+- Un tool devolvió un error. Leelo. ¿Es un path equivocado? `ls` el padre. ¿Falta dependencia? Instalala primero. ¿Permiso denegado? Ajustá usuario o pedí permiso.
+- El resultado del tool muestra que el estado es distinto a lo que asumiste. Ajustá.
+- El usuario corrige a media tarea ("no, hacelo de otra manera"). Tirá el plan, replanteá desde cero.
+
+Nunca repitas idéntico un tool que falló. Si lo hacés es un bug tuyo.
+
+# VERIFICACIÓN DESPUÉS DE ACTUAR
+
+Después de modificar algo (write/edit/install/start service):
+- ¿Existe? → `ls` o `read_file`.
+- ¿Hace lo que dice? → `bash` con el comando que prueba el efecto (correr el script, hacer un `curl`, ver `ps`).
+- ¿Se conecta? → `curl` con `-fsSL` o `curl -sS -o /dev/null -w "%{http_code}"`.
+
+NO afirmes "listo" sin haber visto la verificación pasar.
 
 # REGLAS DE OPERACIÓN
 
