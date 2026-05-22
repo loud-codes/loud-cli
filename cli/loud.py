@@ -1051,9 +1051,29 @@ async def main_async(args: argparse.Namespace) -> int:
         cfg["api_url"] = args.api_url
         save_config(cfg)
 
-    # First-run: no auth, no config — walk through setup
-    if not AUTH_FILE.exists() and not args.question:
+    # Subcommands that intentionally work without auth
+    NOAUTH = {"login", "logout", "update", "version", "--help", "-h", "help"}
+
+    is_noauth = bool(args.question) and args.question[0] in NOAUTH
+
+    # First-run experience: walk through setup wizard if no config saved yet.
+    if not CONFIG_FILE.exists() and not is_noauth:
         await setup_wizard(cfg)
+        cfg = load_config()  # reload in case wizard saved changes
+
+    # Login is REQUIRED for anything except the explicit no-auth subcommands.
+    # Loop until we have a valid token (or the user gives up with Ctrl+C).
+    if not is_noauth and not get_token():
+        cprint(f"\n  Sesión requerida — entra con tu cuenta de loud.codes.", C.BRAND, bold=True)
+        cprint(f"  (¿no tienes cuenta? Regístrate en https://loud.codes)\n", C.GRAY)
+        for attempt in range(3):
+            ok = await cmd_login(cfg)
+            if ok:
+                break
+            cprint(f"\n  · intento {attempt + 1}/3 falló — vuelve a intentar\n", C.YELLOW)
+        if not get_token():
+            cprint("\n  · sin sesión válida — saliendo. Corre 'loud login' cuando quieras.", C.RED)
+            return 1
 
     # Subcommands
     if args.question and args.question[0] in ("login", "logout", "whoami", "update", "version"):
@@ -1077,10 +1097,6 @@ async def main_async(args: argparse.Namespace) -> int:
         cprint("  · historial borrado", C.YELLOW)
         if not args.question:
             return 0
-
-    if not get_token():
-        cprint("  · no estás logueado. Corre: loud login", C.YELLOW)
-        return 1
 
     if args.question:
         messages = [{"role": "system", "content": STATIC_SYSTEM_PROMPT}]
