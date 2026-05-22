@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.7.8"
+__version__ = "0.7.9"
 
 # ───────────────────── Config ─────────────────────
 
@@ -66,6 +66,10 @@ DEFAULT_CONFIG = {
     "local_ollama_url":   "http://127.0.0.1:11434",
     "local_model":        "qwen2.5:3b",          # ~2GB, runs on any modern laptop
     "local_model_vision": "llama3.2-vision:11b", # only auto-pulled if user opts in
+    # Brain access from terminal: OFF by default. Terminal is direct PC
+    # control + model's training knowledge. The brain (curated knowledge from
+    # the admin web UI) stays on the web side. Toggle with /brain on|off.
+    "use_brain": False,
 }
 
 
@@ -1078,20 +1082,25 @@ async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
     """Original cloud path — talk to api.loud.codes with brain + tools.
     Memory is OFF by default so old chats can't leak into this one. RAG is
     ON because the brain has curated knowledge, but the server gates it by
-    relevance so casual prompts ('hola') don't trigger spurious context."""
+    relevance so casual prompts ('hola') don't trigger spurious context.
+
+    TERMINAL PRIVACY MODEL: the CLI defaults to use_rag=False and use_memory=
+    False. Terminal mode = direct PC control + the model's own training
+    knowledge. The brain (curated docs from the admin UI) is reserved for the
+    web app. Power users can opt in by setting cfg.use_brain=true."""
     token = get_token()
     if not token:
         yield {"error": "not_logged_in"}
         return
     payload = {
-        "model": cfg["model"],
-        "messages": messages,
-        "tools": TOOLS_SCHEMA,
-        "chat_id": cfg.get("_chat_id"),
-        "use_rag": True,
+        "model":      cfg["model"],
+        "messages":   messages,
+        "tools":      TOOLS_SCHEMA,
+        "chat_id":    cfg.get("_chat_id"),
+        "use_rag":    bool(cfg.get("use_brain", False)),
         "use_memory": False,
-        "use_web": True,
-        "stream": True,
+        "use_web":    True,
+        "stream":     True,
     }
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/x-ndjson"}
     try:
@@ -1658,6 +1667,16 @@ async def repl(cfg: dict) -> None:
                     await cmd_setup_local(cfg)
                 else:
                     cprint("  · uso: /setup local", C.YELLOW)
+            elif cmd == "/brain":
+                if arg.strip().lower() in ("on", "yes", "true", "1"):
+                    cfg["use_brain"] = True; save_config(cfg)
+                    cprint("  · brain ON — consultas usan conocimiento curado del admin", C.YELLOW)
+                elif arg.strip().lower() in ("off", "no", "false", "0"):
+                    cfg["use_brain"] = False; save_config(cfg)
+                    cprint("  · brain OFF — terminal solo usa el modelo + tools (privacidad)", C.YELLOW)
+                else:
+                    state = "ON" if cfg.get("use_brain") else "OFF"
+                    cprint(f"  · brain: {state}  ·  uso: /brain on|off", C.YELLOW)
             elif cmd == "/cwd":
                 cprint(f"  · {Path.cwd()}", C.YELLOW)
             elif cmd == "/login":
