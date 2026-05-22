@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -521,35 +521,83 @@ def get_token() -> str:
 
 
 async def cmd_login(cfg: dict, identifier: str | None = None, password: str | None = None) -> bool:
-    import getpass
-    if not identifier:
-        cprint("Usuario o email: ", C.BRAND, bold=True, end="")
-        identifier = input().strip()
-    if not password:
-        password = getpass.getpass("Contraseña: ")
-    if not identifier or not password:
-        cprint("  · cancelado", C.RED)
-        return False
+    """Browser-based device-flow login. Same UX as Claude Code / gh CLI:
+      1. We open the browser to a verification URL with a session code
+      2. User logs in on the web (or is already logged in) and clicks "Approve"
+      3. We poll the server until the token shows up, then save it locally
+
+    Falls back to printing the URL if the browser can't open."""
+    import webbrowser
+
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(
-                f"{cfg['api_url']}/v1/auth/login",
-                json={"identifier": identifier, "password": password},
-            )
-        if r.status_code != 200:
-            try:
-                msg = r.json().get("detail", r.text[:200])
-            except Exception:
-                msg = r.text[:200]
-            cprint(f"  · login failed: {msg}", C.RED)
-            return False
-        data = r.json()
-        save_auth({"token": data["token"], "user": data["user"], "api_url": cfg["api_url"]})
-        cprint(f"  ✓ entraste como {data['user'].get('username') or data['user']['email']} ({data['user']['role']})", C.GREEN)
-        return True
+            r = await client.post(f"{cfg['api_url']}/v1/auth/cli/init")
+            if r.status_code != 200:
+                cprint(f"  · couldn't init CLI session: {r.status_code} {r.text[:200]}", C.RED)
+                return False
+            init = r.json()
     except Exception as e:
-        cprint(f"  · error de login: {e}", C.RED)
+        cprint(f"  · network error: {e}", C.RED)
         return False
+
+    sid  = init["session_id"]
+    code = init["code"]
+    url  = init["verification_url"]
+
+    cprint("", "")
+    cprint(f"  ┌─ LOUD login ───────────────────────────────────────────────────", C.BRAND, bold=True)
+    cprint(f"  │", C.BRAND)
+    cprint(f"  │  Para finalizar el login, abre esta URL en tu navegador:", C.BRAND)
+    cprint(f"  │", C.BRAND)
+    cprint(f"  │    {url}", C.BRAND, bold=True)
+    cprint(f"  │", C.BRAND)
+    cprint(f"  │  Código de verificación (debe coincidir en pantalla):", C.BRAND)
+    cprint(f"  │    {code}", C.BRAND, bold=True)
+    cprint(f"  │", C.BRAND)
+    cprint(f"  └─ esperando aprobación…  (Ctrl+C cancela)", C.BRAND)
+    cprint("", "")
+
+    # Try to open the browser; ignore failure (user can still copy/paste)
+    try:
+        webbrowser.open(url, new=2)
+    except Exception:
+        pass
+
+    # Poll the server every 2s until approved or expired
+    deadline = time.time() + 900  # 15 min match server TTL
+    spinner = "⣷⣯⣟⡿⢿⣻⣽⣾"; i = 0
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            while time.time() < deadline:
+                # spinner tick
+                sys.stdout.write(f"\r  {C.BRAND}{spinner[i % len(spinner)]}{C.RESET}  polling…  ")
+                sys.stdout.flush()
+                i += 1
+                try:
+                    r = await client.get(f"{cfg['api_url']}/v1/auth/cli/poll", params={"session_id": sid})
+                    if r.status_code == 200:
+                        st = r.json()
+                        if st.get("status") == "approved":
+                            sys.stdout.write("\r" + " " * 60 + "\r")
+                            save_auth({"token": st["token"], "user": st["user"], "api_url": cfg["api_url"]})
+                            u = st["user"]
+                            cprint(f"  ✓ entraste como {u.get('username') or u['email']} ({u['role']})", C.GREEN)
+                            return True
+                        if st.get("status") in ("expired", "denied"):
+                            sys.stdout.write("\r" + " " * 60 + "\r")
+                            cprint(f"  · login {st.get('status')}", C.RED)
+                            return False
+                except Exception:
+                    pass
+                await asyncio.sleep(2.0)
+    except KeyboardInterrupt:
+        sys.stdout.write("\r" + " " * 60 + "\r")
+        cprint("  · login cancelado", C.YELLOW)
+        return False
+
+    sys.stdout.write("\r" + " " * 60 + "\r")
+    cprint("  · login expiró (15 min). Corre `loud login` de nuevo.", C.RED)
+    return False
 
 
 async def cmd_logout() -> None:
