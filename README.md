@@ -27,20 +27,16 @@ The model is yours. The data is yours. The terminal is yours.
 
 ## What is this
 
-**LOUD** is a private AI that runs on infrastructure you own. The `loud` CLI is the on-machine half — it lives in your shell, talks to your LOUD server over the network, and acts as a coding agent that can read, edit, and run things on your computer with explicit consent.
-
-Think Claude Code or Cursor, but the model never leaves your data center.
+**LOUD** is a private, invite-only AI hosted by TL Music Entertainment. The `loud` CLI is the on-machine half — it lives in your shell and acts as an agent that can read, edit, and run things on your computer with explicit consent. The backend is closed and is not available for third-party hosting.
 
 ```
 ┌──────────────┐         ┌──────────────────┐         ┌─────────────────┐
-│  your shell  │ ──────▶ │   loud CLI       │ ──────▶ │  your LOUD api  │
-│              │         │  (local agent)   │         │  (your server)  │
-│  ↑ output    │ ◀────── │  read/write/run  │ ◀────── │  qwen / RAG /   │
-│              │         │  with permission │         │  memory         │
+│  your shell  │ ──────▶ │   loud CLI       │ ──────▶ │  LOUD private   │
+│              │         │  (local agent)   │         │     backend     │
+│  ↑ output    │ ◀────── │  read/write/run  │ ◀────── │  (invite only)  │
+│              │         │  with permission │         │                 │
 └──────────────┘         └──────────────────┘         └─────────────────┘
 ```
-
-The CLI does not phone home. Every byte goes to the LOUD server you point it at (default `https://api.loud.codes`, or your own at `loud --api-url https://yours.example.com`).
 
 ---
 
@@ -99,10 +95,9 @@ First run walks you through a 30-second setup: confirm the server URL, pick a pe
 │                                                            │
 │   ✻ Welcome to LOUD — terminal-first AI                    │
 │                                                            │
-│   sesión:  you@example.com · admin                         │
+│   sesión:  ceo@loud.codes · admin                          │
 │   modelo:  loud-go   permisos:  ask                        │
 │   cwd:     ~/my-project                                    │
-│   server:  https://api.loud.codes                          │
 │                                                            │
 │   /help para comandos · Esc detiene el agente · Ctrl+C sale│
 │                                                            │
@@ -213,7 +208,7 @@ Switch with `loud --model loud-2.0` or `/model loud-2.0` inside the REPL.
 
 - Internal IPs and infra hostnames are **scrubbed** from every line the CLI prints.
 - Auth lives in `~/.loud/auth.json` with `0600` perms on Unix.
-- The CLI does **not** phone home. Every byte goes to your LOUD server.
+- The CLI talks only to the private LOUD backend assigned to your invite.
 - The agent never names external model providers in its output.
 - Destructive operations route through the permission gate unless you explicitly opted into `yolo`.
 

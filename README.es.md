@@ -94,7 +94,8 @@ loud                                # REPL interactiva
 | `loud` | REPL interactiva |
 | `loud --reset` | Borrar historial |
 | `loud --model NAME` | Cambiar modelo |
-| `loud --api-url URL` | Apuntar a otro backend |
+| `loud --local` / `--auto` / `--cloud` | Modo de inferencia (local · híbrido · cloud) |
+| `loud --dangerously-skip-permissions` / `--yolo` | Saltar prompts |
 
 ### Dentro de la REPL
 
@@ -144,10 +145,10 @@ a todos tus proyectos.
 
 ## Privacidad
 
-- Tus prompts y archivos solo se mandan al backend que configures.
-- El backend default (`api.loud.codes`) corre el modelo en infra dedicada —
-  sin APIs LLM de terceros en el medio.
+- Tus prompts y archivos solo se mandan al backend privado de LOUD asignado a tu invitación.
+- El backend es privado e invite-only (no disponible para hosting de terceros).
 - Sin telemetría. Solo se guarda tu historial local (`~/.loud/`).
+- Cada chat es un sandbox aislado — no compartimos contexto entre conversaciones.
 
 ## Configuración
 
