@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.7.3"
+__version__ = "0.7.4"
 
 # ───────────────────── Config ─────────────────────
 
@@ -141,6 +141,91 @@ def _shell_args(cmd: str) -> list[str]:
     return ["bash", "-c", cmd]
 
 
+# ───────────────────── Arrow-key selector ─────────────────────
+
+def _read_key() -> str:
+    """Block on one keystroke. Returns 'up', 'down', 'enter', 'esc', 'q', 'e',
+    'y', 'n', 'a', 's', or '' for unknown. Falls back to line-input on non-TTY."""
+    if not sys.stdin.isatty():
+        try: line = input().strip().lower()
+        except (EOFError, KeyboardInterrupt): return "esc"
+        if not line: return "enter"
+        head = line[0]
+        return {"y":"y","n":"n","a":"a","s":"s","e":"e","q":"esc"}.get(head, head)
+    if IS_WINDOWS:
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            ch2 = msvcrt.getwch()
+            return {"H": "up", "P": "down"}.get(ch2, "")
+        if ch in ("\r", "\n"): return "enter"
+        if ch == "\x1b": return "esc"
+        return ch.lower()
+    # Unix raw mode
+    import termios, tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            seq = sys.stdin.read(2)
+            if seq == "[A": return "up"
+            if seq == "[B": return "down"
+            return "esc"
+        if ch in ("\r", "\n"): return "enter"
+        if ch == "\x03": raise KeyboardInterrupt
+        return ch.lower()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def select_option(prompt_text: str, options: list[tuple[str, str]], default: int = 0) -> str:
+    """Interactive arrow-key selector. options = [(key, label), ...].
+    Up/Down to move, Enter to confirm, Esc to cancel (returns 'esc').
+    Hotkeys still work — pressing the first letter of an option jumps to it.
+    Returns the chosen key, or 'esc'."""
+    if not sys.stdin.isatty():
+        # Non-interactive — just print the prompt and read a line.
+        print(prompt_text)
+        for k, lab in options:
+            print(f"   [{k}] {lab}")
+        try: raw = input("→ ").strip().lower()
+        except (EOFError, KeyboardInterrupt): return "esc"
+        if not raw: return options[default][0]
+        for k, _ in options:
+            if k.startswith(raw[0]): return k
+        return "esc"
+    idx = default
+    n = len(options)
+    first = True
+    try:
+        while True:
+            if not first:
+                # Move cursor up n lines, clear each, repaint.
+                sys.stdout.write(f"\033[{n}A")
+            for i, (k, lab) in enumerate(options):
+                marker = "▶" if i == idx else " "
+                line = f"   {marker} [{k}] {lab}"
+                if i == idx:
+                    line = f"\033[7m{line}\033[0m"
+                sys.stdout.write("\033[2K" + line + "\n")
+            sys.stdout.flush()
+            first = False
+            key = _read_key()
+            if key == "up":   idx = (idx - 1) % n
+            elif key == "down": idx = (idx + 1) % n
+            elif key == "enter": return options[idx][0]
+            elif key == "esc": return "esc"
+            elif len(key) == 1:
+                for i, (k, _) in enumerate(options):
+                    if k.startswith(key):
+                        idx = i
+                        return options[idx][0]
+    except KeyboardInterrupt:
+        return "esc"
+
+
 # ───────────────────── Permission system ─────────────────────
 # Tools that mutate state on the user's machine require explicit consent.
 # Modes:
@@ -204,7 +289,9 @@ def is_destructive(tool: str, args: dict) -> bool:
 
 
 def request_permission(cfg: dict, tool: str, args: dict) -> str:
-    """Returns 'allow', 'deny', or 'stop'."""
+    """Returns 'allow', 'deny', or 'stop'. Mutates `args` in-place when the
+    user picks 'edit' — they get to rewrite the cmd / path / content before
+    the tool fires."""
     mode = cfg.get("permission_mode", "ask")
     if mode == "yolo":
         return "allow"
@@ -217,7 +304,6 @@ def request_permission(cfg: dict, tool: str, args: dict) -> str:
     if perms.get(key) == "always":
         return "allow"
 
-    # Show what's about to happen
     cprint("", "")
     cprint(f"  ┌─ permiso requerido ─ {tool}", C.YELLOW, bold=True)
     if tool == "bash":
@@ -228,10 +314,15 @@ def request_permission(cfg: dict, tool: str, args: dict) -> str:
         cprint(f"  │  → {args.get('path')}  ({len(args.get('content', ''))} bytes)", C.GRAY)
     elif tool == "edit_file":
         cprint(f"  │  ✎ {args.get('path')}", C.GRAY)
-    cprint(f"  └─ [y]es · [n]o · [a]lways · [s]top  →  ", C.YELLOW, end="")
-    try:
-        ans = (input().strip().lower() or "n")[0]
-    except (EOFError, KeyboardInterrupt):
+    cprint(f"  └─ usa ↑/↓ y Enter (o presiona la letra)", C.YELLOW)
+    ans = select_option("", [
+        ("y", "Sí, correr esto"),
+        ("n", "No, cancelar"),
+        ("e", "Editar antes de correr"),
+        ("a", "Siempre permitir esto"),
+        ("s", "Detener al agente"),
+    ], default=0)
+    if ans == "esc":
         return "stop"
     if ans == "a":
         perms[key] = "always"
@@ -241,6 +332,52 @@ def request_permission(cfg: dict, tool: str, args: dict) -> str:
         return "allow"
     if ans == "s":
         return "stop"
+    if ans == "e":
+        # Let the user rewrite the command / path. Mutate args in-place.
+        if tool == "bash":
+            cprint(f"     edita el comando (enter cancela):", C.YELLOW)
+            cprint(f"     $ ", C.GRAY, end="")
+            try:
+                new_cmd = input()
+            except (EOFError, KeyboardInterrupt):
+                return "deny"
+            if new_cmd.strip():
+                args["cmd"] = new_cmd
+                cprint(f"  → bash({shorten(new_cmd, 120)})", C.BRAND)
+                return "allow"
+            return "deny"
+        if tool == "ssh":
+            cprint(f"     comando remoto (enter cancela):", C.YELLOW)
+            cprint(f"     {args.get('host')}> ", C.GRAY, end="")
+            try:
+                new_cmd = input()
+            except (EOFError, KeyboardInterrupt):
+                return "deny"
+            if new_cmd.strip():
+                args["cmd"] = new_cmd
+                return "allow"
+            return "deny"
+        if tool == "write_file":
+            cprint(f"     ruta destino (enter mantiene {args.get('path')}):", C.YELLOW)
+            cprint(f"     → ", C.GRAY, end="")
+            try:
+                new_path = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                return "deny"
+            if new_path:
+                args["path"] = new_path
+            return "allow"
+        if tool == "edit_file":
+            cprint(f"     nuevo contenido reemplazo (enter mantiene el del modelo):", C.YELLOW)
+            cprint(f"     ✎ ", C.GRAY, end="")
+            try:
+                new_text = input()
+            except (EOFError, KeyboardInterrupt):
+                return "deny"
+            if new_text:
+                args["new"] = new_text
+            return "allow"
+        return "allow"
     return "deny"
 
 
@@ -721,15 +858,43 @@ async def _maybe_check_update_async() -> None:
             )
             m = re.search(r'__version__\s*=\s*[\'"]([^\'"]+)[\'"]', r.text)
             latest = m.group(1) if m else __version__
-        check_file.write_text(json.dumps({"checked_at": time.time(), "latest": latest}))
+        # Only persist if newer than installed — otherwise we just clear the
+        # cache so the banner stays clean.
+        if _semver_tuple(latest) > _semver_tuple(__version__):
+            check_file.write_text(json.dumps({"checked_at": time.time(), "latest": latest}))
+        else:
+            try: check_file.unlink()
+            except Exception: pass
     except Exception:
         pass
 
 
+def _semver_tuple(v: str) -> tuple[int, ...]:
+    """'0.7.3' → (0, 7, 3). Non-numeric chunks become 0 so we never crash."""
+    out = []
+    for part in (v or "").strip().lstrip("v").split("."):
+        try: out.append(int(re.sub(r"[^0-9].*$", "", part) or "0"))
+        except Exception: out.append(0)
+    while len(out) < 3:
+        out.append(0)
+    return tuple(out)
+
+
 def _cached_latest_version() -> str | None:
+    """Return the cached "latest" string ONLY if it's strictly newer than the
+    installed version. Stale or older caches are wiped so we never show a
+    bogus "new version available: <older>" pill in the banner."""
     try:
-        data = json.loads((LOUD_DIR / "update_check.json").read_text())
-        return data.get("latest")
+        check_file = LOUD_DIR / "update_check.json"
+        data = json.loads(check_file.read_text())
+        latest = data.get("latest")
+        if latest and _semver_tuple(latest) > _semver_tuple(__version__):
+            return latest
+        # Cached version is equal or older than installed → toss it.
+        if latest and _semver_tuple(latest) < _semver_tuple(__version__):
+            try: check_file.unlink()
+            except Exception: pass
+        return None
     except Exception:
         return None
 
@@ -826,17 +991,84 @@ async def stream_chat(cfg: dict, messages: list[dict]):
         yield {"error": f"network: {type(e).__name__}: {e}"}
 
 
+_STREAM_STATE = {"col": 0, "indent_done": False, "in_fence": False}
+
+
+def terminal_layout() -> tuple[int, int, int]:
+    """Returns (cols, content_width, left_pad). Content is rendered inside a
+    centered band capped at 92 columns so the layout stays uniform whether the
+    user widens or narrows the terminal — identical to how Claude Code keeps
+    its content centered. Mirror of the banner geometry below."""
+    try:
+        cols = shutil.get_terminal_size((100, 24)).columns
+    except Exception:
+        cols = 100
+    content_w = min(max(cols - 4, 40), 92)
+    left_pad = max(2, (cols - content_w) // 2)
+    return cols, content_w, left_pad
+
+
+def stream_reset() -> None:
+    _STREAM_STATE["col"] = 0
+    _STREAM_STATE["indent_done"] = False
+    _STREAM_STATE["in_fence"] = False
+
+
 async def typewriter_write(text: str, color: str = "") -> None:
-    """Stream characters out at a steady human-readable pace. Lags catch up
-    automatically so we never feel slow."""
+    """Stream characters at a steady pace with a centered, soft-wrapped layout.
+    Wraps on spaces at `content_w`, keeps the indent stable across newlines so
+    paragraphs stay vertically aligned. Code fences (```...```) get the same
+    indent but no soft-wrap inside (code formatting decides line breaks)."""
     text = scrub(text)
+    if not text:
+        return
+    cols, content_w, left_pad = terminal_layout()
+    pad = " " * left_pad
     if color:
         sys.stdout.write(color)
-    for i, ch in enumerate(text):
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        # Newline → reset line state and emit indent on the next char.
+        if ch == "\n":
+            sys.stdout.write("\n")
+            _STREAM_STATE["col"] = 0
+            _STREAM_STATE["indent_done"] = False
+            i += 1
+            continue
+        # Detect entering/leaving a triple-backtick fence.
+        if ch == "`" and text[i:i+3] == "```":
+            if not _STREAM_STATE["indent_done"]:
+                sys.stdout.write(pad)
+                _STREAM_STATE["indent_done"] = True
+                _STREAM_STATE["col"] = 0
+            sys.stdout.write("```")
+            _STREAM_STATE["col"] += 3
+            _STREAM_STATE["in_fence"] = not _STREAM_STATE["in_fence"]
+            i += 3
+            continue
+        # First visible char of a line → emit left pad.
+        if not _STREAM_STATE["indent_done"]:
+            # Skip leading spaces at line start (they create double-indent).
+            if ch == " " and _STREAM_STATE["col"] == 0:
+                i += 1
+                continue
+            sys.stdout.write(pad)
+            _STREAM_STATE["indent_done"] = True
+            _STREAM_STATE["col"] = 0
+        # Soft-wrap on space when past content_w. Skip inside code fences.
+        if (not _STREAM_STATE["in_fence"]) and _STREAM_STATE["col"] >= content_w and ch == " ":
+            sys.stdout.write("\n" + pad)
+            _STREAM_STATE["col"] = 0
+            i += 1
+            continue
         sys.stdout.write(ch)
+        _STREAM_STATE["col"] += 1
         if i % 6 == 0:
             sys.stdout.flush()
-            await asyncio.sleep(0)  # yield to loop
+            await asyncio.sleep(0)
+        i += 1
     if color:
         sys.stdout.write(C.RESET)
     sys.stdout.flush()
@@ -923,11 +1155,14 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                 if chunk:
                     if not full_text:
                         cprint("", "")
+                        stream_reset()
                     full_text += chunk
                     if cfg.get("typewriter", True):
-                        await typewriter_write(chunk, C.BRAND)
+                        # Long assistant prose stays WHITE (default). Accent
+                        # colors are reserved for status/tool/error lines.
+                        await typewriter_write(chunk)
                     else:
-                        sys.stdout.write(C.BRAND + scrub(chunk) + C.RESET)
+                        sys.stdout.write(scrub(chunk))
                         sys.stdout.flush()
         except StopAgent:
             cprint("\n  · detenido por el usuario", C.YELLOW)
@@ -990,6 +1225,15 @@ def render_banner(cfg: dict) -> str:
     D = C.DIM
     B = C.BOLD
     Y = C.YELLOW
+    # Center the banner box inside the terminal so its left edge stays at the
+    # same column as the rest of the streamed content. terminal_layout caps the
+    # content band at 92 cols and gives us the left padding to match.
+    try:
+        cols = shutil.get_terminal_size((100, 24)).columns
+    except Exception:
+        cols = 100
+    box_w = W + 4  # inner padding + 2 borders
+    LP = " " * max(2, (cols - box_w) // 2)
 
     logo_lines = [
         "██╗      ██████╗ ██╗   ██╗██████╗ ",
@@ -1003,12 +1247,12 @@ def render_banner(cfg: dict) -> str:
     def row(content: str) -> str:
         visible = re.sub(r"\033\[[0-9;]*m", "", content)
         gap = max(0, W - len(visible))
-        return f"{G}│{R} {content}{' ' * gap} {G}│{R}\n"
+        return f"{LP}{G}│{R} {content}{' ' * gap} {G}│{R}\n"
 
-    top    = f"{G}╭{'─' * (W + 2)}╮{R}\n"
-    bot    = f"{G}╰{'─' * (W + 2)}╯{R}\n"
+    top    = f"{LP}{G}╭{'─' * (W + 2)}╮{R}\n"
+    bot    = f"{LP}{G}╰{'─' * (W + 2)}╯{R}\n"
     blank  = row("")
-    sep    = f"{G}├{'─' * (W + 2)}┤{R}\n"
+    sep    = f"{LP}{G}├{'─' * (W + 2)}┤{R}\n"
 
     out = [top, blank]
     for line in logo_lines:
