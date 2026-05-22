@@ -15,11 +15,12 @@ BLUE="${ESC}[34m"
 MAGENTA="${ESC}[35m"
 CYAN="${ESC}[36m"
 ORANGE="${ESC}[38;5;208m"
+BRAND="${ESC}[38;5;149m"
 GRAY="${ESC}[90m"
 RESET="${ESC}[0m"
 
 print_banner() {
-  printf "${ORANGE}${BOLD}\n"
+  printf "${BRAND}${BOLD}\n"
   cat <<'EOF'
    ██╗      ██████╗ ██╗   ██╗██████╗
    ██║     ██╔═══██╗██║   ██║██╔══██╗
