@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # ───────────────────── Config ─────────────────────
 
@@ -517,7 +517,62 @@ def request_permission(cfg: dict, tool: str, args: dict) -> str:
 
 # ───────────────────── Tools ─────────────────────
 
+def _validate_bash_complexity(cmd: str) -> str | None:
+    """Hard ceiling on how much a single bash call can do. The model must
+    decompose multi-step work into separate tool calls — we won't run a
+    megachain even if asked. Returns None when ok, or an error string the
+    model gets in place of execution.
+
+    Allowed:
+    - 0 chain operators (single command)
+    - 1 chain operator (action + verification, e.g. `mkdir -p /x && ls /x`)
+    - Pipes (`|`) are fine — they're a single conceptual operation.
+
+    Rejected:
+    - 2+ `&&`/`||`/`;` operators (multiple sequential actions in one call).
+    - More than one of the following "phase keywords" in a row: install,
+      clone, mkdir, write, serve, run, start, expose. Those should each be
+      their own tool call so the user sees progress one step at a time.
+    """
+    if not cmd or not cmd.strip(): return None
+    cleaned = cmd.strip()
+    # Strip quoted segments so operators inside strings don't count.
+    stripped = re.sub(r"'[^']*'|\"[^\"]*\"", "", cleaned)
+    op_count = (
+        stripped.count("&&") +
+        stripped.count("||") +
+        # Only count semicolons that look like statement separators, not
+        # things like `find ... \;`.
+        sum(1 for m in re.finditer(r"(?<!\\);(?!\s*$)", stripped))
+    )
+    if op_count >= 2:
+        return (
+            "ERROR rechazado por el CLI: este comando encadena "
+            f"{op_count} acciones en un solo bash (operadores &&/||/;). "
+            "Reglas del agente: UNA acción atómica por tool call. "
+            "Partilo en pasos separados — corré el primer paso ahora, "
+            "esperá el resultado, después el siguiente. Ej: en vez de "
+            "`brew install A && brew install B && python -m http.server &`, "
+            "hacé tres bash separados."
+        )
+    # Phase keywords — rough but useful for the small qwen models.
+    phase_words = ["install", "clone", "mkdir", "serve", "start", "expose", "ngrok http"]
+    low = stripped.lower()
+    matched = [w for w in phase_words if re.search(rf"\b{re.escape(w)}\b", low)]
+    if len(matched) >= 2 and op_count >= 1:
+        return (
+            f"ERROR rechazado por el CLI: este comando mezcla {len(matched)} fases "
+            f"({', '.join(matched)}) en un solo bash. Hacé cada fase como un tool call "
+            "separado para poder verificar entre pasos."
+        )
+    return None
+
+
 async def tool_bash(cmd: str, timeout: int = 120) -> str:
+    # Step-gating: refuse megachains so the model is forced to decompose.
+    err = _validate_bash_complexity(cmd)
+    if err:
+        return err
     try:
         proc = subprocess.run(_shell_args(cmd), capture_output=True, text=True, timeout=timeout)
         out = proc.stdout or ""
@@ -826,23 +881,31 @@ Antes de editar un archivo, leelo. Antes de actuar en una carpeta desconocida, h
 ## 3. Encadena tools sin pedir permiso
 Tu flujo típico para "arreglá X" es: `ls` → `read_file` → entender → `edit_file`/`bash` → verificar con `bash` o `read_file`. NO pidas confirmaciones intermedias — el CLI muestra `[y/n/e/a/s]` al usuario para las destructivas. Tú sólo invocás la tool y seguís.
 
-## 4. UNA acción por tool call — pensá por cortes
-Esta es la regla más importante. Cada tool call hace UNA cosa atómica. NO empaques múltiples pasos en un solo `bash` con `&&`/`||`/`;`. Pasos por separado te dan: (a) confirmar que el paso anterior funcionó, (b) reaccionar si falla, (c) feedback claro al usuario, (d) cabeza fresca para decidir el próximo paso.
+## 4. UNA acción por tool call — SIEMPRE, no solo para tareas grandes
+Esta es la regla más importante y aplica al 100% de tus turnos, no solo cuando la tarea "se ve compleja". Cada tool call hace UNA cosa atómica. Tu trabajo es ser un asistente que opera paso a paso, no un script que dispara todo de golpe. Pasos chicos te dan: (a) confirmar que el paso anterior funcionó antes del siguiente, (b) reaccionar a errores en cuanto aparecen, (c) feedback visible al usuario para que vea progreso, (d) la posibilidad de que el usuario te frene a mitad y reajuste.
 
-REGLAS DE CHAINING:
-- `bash` puede usar UN `&&` máximo para combinar comando-de-acción + verificación corta (ej: `mkdir -p /tmp/x && ls /tmp/x`).
-- NUNCA encadenes install + crear archivo + arrancar servidor en un solo bash. Eso son 3 tool calls separados.
-- NUNCA `brew install A && brew install B && python -m … &` — partilo: primero `brew install A`, después `brew install B`, después arrancar el servidor.
-- Operaciones independientes (varios `read_file` de archivos distintos) SÍ podés emitirlas en paralelo en un solo turno — pero cada una es su propia tool call, no un mega-comando shell.
+HARD LIMITS (impuestos por el CLI, te van a devolver ERROR si los violás):
+- `bash` máximo UN `&&` (acción + verificación corta, ej: `mkdir -p /x && ls /x`). El CLI rechaza 2+ operadores `&&`/`||`/`;` y te obliga a partir.
+- `bash` no puede mezclar 2+ "fases" (install, clone, mkdir, serve, start, expose, ngrok http) en un solo comando. El CLI rechaza eso y te obliga a tool calls separados.
+- NUNCA hagas `brew install A && brew install B && python -m … &`. Eso son 3 bash separados.
+- Operaciones independientes (varios `read_file` de archivos distintos) SÍ podés emitirlas en paralelo en un solo turno — pero cada una es su propia tool call, no un megacomando shell.
 
-## 4b. Tareas multi-paso → plan corto + ejecutar paso 1 sólo
-Si el usuario pide algo que requiere ≥3 acciones (ej: "instala X, arranca Y, exponlo con Z"):
-1. En una frase muy corta, listá tu plan numerado (1. … 2. … 3. …).
-2. Ejecutá SÓLO el paso 1.
-3. Mirá el resultado.
-4. Si el paso 1 ok → siguiente. Si falló → reaccioná.
+## 4b. SIEMPRE narrá el siguiente paso ANTES de invocarlo
+Antes de cada tool call decí en una frase corta qué vas a hacer. No es un plan complejo, es un anuncio mínimo:
+- "Primero voy a ver si ngrok está." → `bash("which ngrok")`
+- "Ahora creo el index.html." → `write_file(...)`
+- "Arranco el servidor." → `bash("nohup python3 -m http.server 8080 &")`
+- "Verifico que responda." → `bash("curl -fsSL http://127.0.0.1:8080/")`
 
-NUNCA intentes "hacer todo de un solo embriónazo". Pequeños pasos, observación entre cada uno. Es la diferencia entre un asistente competente y un script roto.
+Una línea, una tool, una espera. Esa es la cadencia.
+
+## 4c. Tareas multi-paso → plan numerado al inicio
+Si el pedido tiene ≥3 acciones (instalar X, arrancar Y, exponer Z):
+1. Línea 1: plan numerado corto.
+2. Línea 2: "Empiezo con (1)." → invocá la primera tool, NADA MÁS.
+3. Después del resultado decidís el siguiente.
+
+NUNCA intentes "hacer todo de un solo embriónazo". Pasitos chicos, observación entre cada uno. Esa es la diferencia entre un asistente real y un script roto que se cae al primer error.
 
 ## 5. Si una tool falla, leé el error y CORREGÍ
 Nunca repitas el mismo comando idéntico esperando otro resultado. Lee `stderr`/error, ajustá los argumentos, intentá una alternativa. Si una ruta no existe, `ls` el directorio padre. Si un paquete falta, instalalo primero.
