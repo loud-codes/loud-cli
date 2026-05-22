@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.1.7"
+__version__ = "1.2.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -825,6 +825,31 @@ async def tool_job_stop(label: str) -> str:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
+async def tool_ask_oracle(question: str) -> str:
+    """One-shot lookup against the private oracle backend. The model uses
+    this when it's stuck and needs how-to-fix knowledge (OS error, missing
+    tool, obscure CLI flag). Not for chit-chat — every call costs an
+    upstream model query. NOT stored in the brain."""
+    token = get_token()
+    if not token:
+        return "ERROR: oracle requires you to be logged in. Run /login first."
+    if not question or len(question.strip()) < 4:
+        return "ERROR: question too short."
+    cfg = load_config()
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                f"{cfg['api_url']}/v1/oracle/ask",
+                json={"question": question.strip()[:1800]},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if r.status_code != 200:
+                return f"ERROR: oracle {r.status_code}: {r.text[:300]}"
+            return (r.json() or {}).get("answer", "(empty answer)")[:4000]
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
 async def tool_bash(cmd: str, timeout: int = 120) -> str:
     # Step-gating: refuse megachains so the model is forced to decompose.
     err = _validate_bash_complexity(cmd)
@@ -1038,6 +1063,13 @@ TOOLS_SCHEMA = [
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     }},
     {"type": "function", "function": {
+        "name": "ask_oracle",
+        "description": "Lookup against the private oracle (Gemini). Use ONLY when you've genuinely tried 2+ approaches to an error and don't know the fix — eg. an unfamiliar OS error message, a tool flag you don't remember, an unusual stack trace. Ask a SPECIFIC technical question; the oracle returns a concise answer with the command/steps to try. The answer is NOT stored anywhere. Don't use it for ordinary terminal questions you can answer with `bash` (`man`, `--help`, `which`).",
+        "parameters": {"type": "object", "properties": {
+            "question": {"type": "string", "description": "Specific technical question, eg 'cómo libero el puerto 8080 en macOS' or 'how do I install ngrok via brew on M-series Mac'."}
+        }, "required": ["question"]},
+    }},
+    {"type": "function", "function": {
         "name": "bash_background",
         "description": "Start a LONG-RUNNING shell command in the BACKGROUND. Use this for servers, watchers, downloaders, ngrok tunnels — anything that doesn't terminate quickly. Returns the PID + log path immediately. The job keeps running after this tool returns. NEVER use bash() with `&` for servers — it hangs the CLI; use this instead. `label` must be a short identifier (eg 'http-1002', 'ngrok').",
         "parameters": {"type": "object", "properties": {
@@ -1082,6 +1114,7 @@ TOOL_FNS = {
     "grep":            tool_grep,
     "ls":              tool_ls,
     "http_get":        tool_http_get,
+    "ask_oracle":      tool_ask_oracle,
 }
 
 
@@ -1195,6 +1228,22 @@ Si el pedido tiene ≥3 acciones (instalar X, arrancar Y, exponer Z):
 3. Después del resultado decidís el siguiente.
 
 NUNCA intentes "hacer todo de un solo embriónazo". Pasitos chicos, observación entre cada uno. Esa es la diferencia entre un asistente real y un script roto que se cae al primer error.
+
+## 4cb. `ask_oracle` cuando NO sepas cómo resolver un error del OS
+Tenés acceso a una tool privada `ask_oracle(question)` que consulta el oráculo interno (Gemini) por una respuesta concreta a una pregunta técnica. **No se almacena en ningún lado** — es lookup en tiempo real. La idea: si tras 2 intentos seguís sin saber CÓMO arreglar un error real del OS (mensaje raro, flag que no recordás, comando específico de la versión del usuario, herramienta exótica), preguntale al oráculo en vez de quedarte trabado o devolverle al usuario una pelota que vos podés resolver.
+
+Reglas para `ask_oracle`:
+- Hacé una pregunta ESPECÍFICA y técnica. Mala: "cómo arreglo esto". Buena: "cómo libero el puerto 1002 en macOS si lsof -ti:1002 está vacío".
+- Aplicá la respuesta vos mismo con una tool (no se la copies al usuario y le digas "probá esto").
+- NO la uses para preguntas que el usuario te hizo conversacionalmente (saludos, opiniones, conceptos). Solo para desbloquear errores técnicos en curso.
+- NO la uses para info de la máquina del usuario que podés sacar con `bash` (versions, paths, estado). Para eso es `bash`.
+- Costo: cada llamada hace un round-trip a un modelo externo. Una sola vez por error; si la respuesta no aplica, intentá razonarlo con tools antes de re-consultar.
+
+Ej de uso correcto:
+1. `bash_background("nginx", label="nginx")` → fail: `bind() to 0.0.0.0:80 failed (98: Address already in use)`.
+2. `bash("lsof -ti:80")` → vacío (el puerto está tomado pero lsof no muestra dueño).
+3. `ask_oracle("en macOS si lsof -ti:80 no devuelve nada pero el puerto está in use, qué comando muestra qué tiene el puerto")` → respuesta: `sudo lsof -i :80` (necesita root para ver procesos del sistema).
+4. Aplicar: `bash("sudo lsof -i :80")`.
 
 ## 4d. AUTONOMÍA TOTAL — luchá hasta resolver, jamás dejes una tarea a medias
 Esta es la regla más estricta. Una vez que arrancaste un plan, tu obligación es COMPLETARLO. Pase lo que pase con las tools.
@@ -1957,6 +2006,7 @@ _TOOL_LABEL = {
     "grep":            "Searching",
     "ls":              "Listing",
     "http_get":        "Fetching",
+    "ask_oracle":      "Consulting",
 }
 
 # Pretty display names for the "● Tool(args)" call header — matches the
@@ -1975,6 +2025,7 @@ _TOOL_DISPLAY = {
     "grep":            "Search",
     "ls":              "List",
     "http_get":        "Fetch",
+    "ask_oracle":      "Oracle",
 }
 
 
@@ -2004,6 +2055,8 @@ def _format_tool_call_header(name: str, args: dict) -> str:
         arg_str = args.get("path") or "."
     elif name == "http_get":
         arg_str = args.get("url", "")
+    elif name == "ask_oracle":
+        arg_str = (args.get("question") or "")[:80]
     else:
         arg_str = json.dumps(args, ensure_ascii=False)
     return f"{display}({shorten(arg_str, 100)})"
