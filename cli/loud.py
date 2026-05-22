@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -953,11 +953,17 @@ def render_banner(cfg: dict) -> str:
 SLASH_HELP = """\
 /help               muestra esta ayuda
 /reset              borra el historial de la sesión actual
-/model NAME         cambia modelo (actual: {model})  · loud-go · loud-pro · loud-ultra
+/model NAME         cambia modelo (actual: {model})
+                    · loud-go (qwen 3b · rápido)
+                    · loud-pro (qwen 7b · equilibrado)
+                    · loud-ultra (qwen 14b · profundo)
+                    · loud-2.0 (qwen 32b · LOUD 2.0 GPU only)
+                    · loud-eye (qwen2-vl · imágenes/screenshots)
 /tools              lista las tools que el agente puede llamar
 /permissions        muestra/cambia el modo de permisos (ask/yolo/safe)
 /save FILE          exporta la conversación a un archivo .md
 /cwd                imprime el directorio actual
+/update             actualiza el CLI a la última versión (igual que `loud update`)
 /exit               salir
 """
 
@@ -1012,6 +1018,8 @@ async def repl(cfg: dict) -> None:
                 cprint(f"  · permisos: {cfg.get('permission_mode')}  (ask/yolo/safe)", C.YELLOW)
             elif cmd == "/cwd":
                 cprint(f"  · {Path.cwd()}", C.YELLOW)
+            elif cmd == "/update":
+                await cmd_update(cfg)
             elif cmd == "/save":
                 target = Path(arg or f"loud-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md").expanduser()
                 target.write_text(format_conversation(messages))
@@ -1119,7 +1127,7 @@ def main() -> int:
     )
     parser.add_argument("question", nargs="*", help="Prompt one-shot o subcomando")
     parser.add_argument("--reset", action="store_true", help="Borrar historial de la sesión")
-    parser.add_argument("--model", help="Modelo: loud-go (rápido), loud-pro, loud-ultra")
+    parser.add_argument("--model", help="Modelo: loud-go · loud-pro · loud-ultra · loud-2.0 · loud-eye (visión)")
     parser.add_argument("--api-url", help="Override del servidor LOUD")
     parser.add_argument("--version", action="version", version=f"loud {__version__}")
     args = parser.parse_args()
