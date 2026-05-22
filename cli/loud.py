@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.7.5"
+__version__ = "0.7.6"
 
 # ───────────────────── Config ─────────────────────
 
@@ -57,6 +57,15 @@ DEFAULT_CONFIG = {
     "max_iterations": 10,
     "permission_mode": "ask",      # ask | yolo | safe (safe = block destructive ops)
     "typewriter": True,
+    # Compute mode for chat inference:
+    #   "cloud"  → talk to api.loud.codes (full brain, RAG, auto-nurture)
+    #   "local"  → talk to local Ollama 127.0.0.1:11434 (zero network latency,
+    #              uses this machine's CPU/GPU, no RAG)
+    #   "auto"   → try local first; fall back to cloud if local isn't ready
+    "mode": "cloud",
+    "local_ollama_url":   "http://127.0.0.1:11434",
+    "local_model":        "qwen2.5:3b",          # ~2GB, runs on any modern laptop
+    "local_model_vision": "llama3.2-vision:11b", # only auto-pulled if user opts in
 }
 
 
@@ -730,6 +739,79 @@ async def cmd_logout() -> None:
     cprint("  ✓ sesión cerrada", C.GREEN)
 
 
+async def cmd_setup_local(cfg: dict) -> int:
+    """Install Ollama on this machine + pull the local model so LOUD can run
+    inference locally (zero network latency, uses this machine's CPU/GPU).
+    Detects mac/linux/windows and uses the right package manager."""
+    cprint("\n  Configurando LOUD local (corre el modelo en TU máquina)\n", C.BRAND, bold=True)
+
+    # 1) Detect Ollama
+    has_ollama = shutil.which("ollama") is not None
+    if has_ollama:
+        cprint("  ✓ ollama ya está instalado", C.GREEN)
+    else:
+        cprint("  · ollama no está instalado. Voy a instalarlo:", C.YELLOW)
+        if IS_MAC:
+            if shutil.which("brew"):
+                install_cmd = ["brew", "install", "ollama"]
+            else:
+                install_cmd = ["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]
+        elif IS_WINDOWS:
+            cprint("  · en Windows abre https://ollama.com/download y ejecuta el instalador.", C.YELLOW)
+            cprint("    Luego vuelve a correr `loud setup local`.", C.GRAY)
+            return 1
+        else:
+            install_cmd = ["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]
+        cprint(f"  → {' '.join(install_cmd)}", C.GRAY)
+        cprint("    Confirma con [y]es para proceder, [n]o para cancelar: ", C.YELLOW, end="")
+        try: ans = (input().strip().lower() or "n")[0]
+        except (EOFError, KeyboardInterrupt): return 1
+        if ans != "y":
+            cprint("  · cancelado por el usuario", C.YELLOW); return 1
+        try:
+            subprocess.run(install_cmd, check=True)
+            cprint("  ✓ ollama instalado", C.GREEN)
+        except subprocess.CalledProcessError as e:
+            cprint(f"  ✗ instalación falló: {e}", C.RED); return 1
+
+    # 2) Make sure ollama serve is running (on mac brew install doesn't auto-start)
+    url = cfg.get("local_ollama_url", "http://127.0.0.1:11434")
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            await client.get(f"{url}/api/tags")
+        cprint(f"  ✓ ollama corriendo en {url}", C.GREEN)
+    except Exception:
+        cprint(f"  · ollama no responde en {url}. Arrancando en background…", C.YELLOW)
+        if IS_MAC and shutil.which("brew"):
+            subprocess.Popen(["brew", "services", "start", "ollama"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        await asyncio.sleep(3)
+        try:
+            async with httpx.AsyncClient(timeout=3) as client:
+                await client.get(f"{url}/api/tags")
+            cprint("  ✓ ollama arrancó", C.GREEN)
+        except Exception:
+            cprint("  ✗ no pude arrancar ollama. Inicia manual con: `ollama serve`", C.RED)
+            return 1
+
+    # 3) Pull the local model
+    model = cfg.get("local_model", "qwen2.5:3b")
+    cprint(f"\n  · descargando modelo {model} (~2GB, primera vez puede tardar)…", C.BRAND)
+    try:
+        subprocess.run(["ollama", "pull", model], check=True)
+        cprint(f"  ✓ {model} listo", C.GREEN)
+    except subprocess.CalledProcessError as e:
+        cprint(f"  ✗ pull falló: {e}", C.RED); return 1
+
+    # 4) Switch mode to auto so the CLI uses local when up
+    cfg["mode"] = "auto"
+    save_config(cfg)
+    cprint(f"\n  ✓ modo cambiado a `auto` — el CLI usará tu máquina cuando ollama esté arriba", C.GREEN, bold=True)
+    cprint(f"    Cámbialo con: /mode cloud · /mode local · /mode auto", C.GRAY)
+    return 0
+
+
 async def cmd_update(cfg: dict) -> int:
     """Self-update: detect how the user installed LOUD and pull the latest."""
     cprint("\n  Buscando actualización…", C.BRAND, bold=True)
@@ -916,8 +998,84 @@ async def setup_wizard(cfg: dict) -> None:
 
 # ───────────────────── Chat / streaming ─────────────────────
 
-async def stream_chat(cfg: dict, messages: list[dict]):
-    """Yield NDJSON events from the LOUD API streaming chat endpoint."""
+async def _ollama_local_ready(cfg: dict) -> tuple[bool, str]:
+    """Probe local Ollama. Returns (is_up, info). info is a short status string."""
+    url = cfg.get("local_ollama_url", "http://127.0.0.1:11434")
+    model = cfg.get("local_model", "qwen2.5:3b")
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            r = await client.get(f"{url}/api/tags")
+            if r.status_code != 200:
+                return False, f"ollama {r.status_code}"
+            tags = r.json().get("models", [])
+            names = {m.get("name", "").split(":")[0] for m in tags} | {m.get("name", "") for m in tags}
+            if model not in {m.get("name") for m in tags} and model.split(":")[0] not in names:
+                return False, f"ollama up but {model} not pulled"
+            return True, f"ollama up · {model}"
+    except Exception as e:
+        return False, f"ollama down: {type(e).__name__}"
+
+
+async def _stream_chat_local(cfg: dict, messages: list[dict]):
+    """Talk directly to local Ollama at 127.0.0.1:11434. Pure local compute,
+    zero network latency. Server brain/RAG is NOT used here — for that the
+    user picks 'cloud' or 'auto' mode."""
+    url = cfg.get("local_ollama_url", "http://127.0.0.1:11434")
+    model = cfg.get("local_model", "qwen2.5:3b")
+    payload = {
+        "model": model,
+        "messages": messages,
+        "tools": TOOLS_SCHEMA,
+        "stream": True,
+        "keep_alive": "30m",
+        "options": {"num_predict": -1},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", f"{url}/api/chat", json=payload) as r:
+                if r.status_code >= 400:
+                    body = await r.aread()
+                    yield {"error": f"local ollama {r.status_code}: {body.decode(errors='replace')[:200]}"}
+                    return
+                pending_tcs = []   # collected across the stream so we can emit the assistant_tool_call event once
+                async for line in r.aiter_lines():
+                    line = (line or "").strip()
+                    if not line:
+                        continue
+                    try:
+                        j = json.loads(line)
+                    except Exception:
+                        continue
+                    msg = j.get("message") or {}
+                    # Ollama emits tool_calls inside the message object. Surface them as the same
+                    # events the cloud agent loop produces so the existing CLI handlers work unchanged.
+                    if msg.get("tool_calls"):
+                        for tc in msg["tool_calls"]:
+                            fn   = (tc.get("function") or {}).get("name", "")
+                            args = (tc.get("function") or {}).get("arguments") or {}
+                            if isinstance(args, str):
+                                try: args = json.loads(args)
+                                except Exception: args = {}
+                            pending_tcs.append(tc)
+                            if pending_tcs and len(pending_tcs) == 1:
+                                yield {"event": "assistant_tool_call",
+                                       "content": msg.get("content", "") or "",
+                                       "tool_calls": pending_tcs}
+                            yield {"event": "tool_call", "name": fn, "args": args, "tool_call_id": tc.get("id")}
+                        # Don't fall through to emit content for the same line.
+                        continue
+                    # Plain content chunk
+                    content = msg.get("content", "") if msg else ""
+                    if content:
+                        yield {"message": {"content": content}, "done": False}
+                    if j.get("done"):
+                        yield {"done": True, "done_reason": j.get("done_reason", "stop")}
+    except Exception as e:
+        yield {"error": f"local network: {type(e).__name__}: {e}"}
+
+
+async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
+    """Original cloud path — talk to api.loud.codes with full brain, RAG, auto-enrich."""
     token = get_token()
     if not token:
         yield {"error": "not_logged_in"}
@@ -928,7 +1086,7 @@ async def stream_chat(cfg: dict, messages: list[dict]):
         "tools": TOOLS_SCHEMA,
         "use_rag": True,
         "use_memory": True,
-        "use_web": True,    # let the model also use server-side web tools
+        "use_web": True,
         "stream": True,
     }
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/x-ndjson"}
@@ -964,6 +1122,32 @@ async def stream_chat(cfg: dict, messages: list[dict]):
                         yield {"raw": buf.strip()}
     except Exception as e:
         yield {"error": f"network: {type(e).__name__}: {e}"}
+
+
+async def stream_chat(cfg: dict, messages: list[dict]):
+    """Route the chat through local Ollama or the cloud API based on cfg.mode.
+    - mode=local → only local Ollama (fast, this machine's compute, no RAG)
+    - mode=auto  → probe local first; if it's not ready, fall back to cloud
+    - mode=cloud → original behavior (full brain on server)"""
+    mode = cfg.get("mode", "cloud")
+    if mode == "local":
+        ok, info = await _ollama_local_ready(cfg)
+        if not ok:
+            yield {"error": f"local mode pero {info}. Corre `loud setup local` o usa /mode auto"}
+            return
+        async for ev in _stream_chat_local(cfg, messages):
+            yield ev
+        return
+    if mode == "auto":
+        ok, info = await _ollama_local_ready(cfg)
+        if ok:
+            async for ev in _stream_chat_local(cfg, messages):
+                yield ev
+            return
+        # Silent fallback to cloud — surface a one-line note so the user knows.
+        yield {"event": "mode_fallback", "info": info}
+    async for ev in _stream_chat_cloud(cfg, messages):
+        yield ev
 
 
 _STREAM_STATE = {"col": 0, "indent_done": False, "in_fence": False}
@@ -1058,11 +1242,100 @@ class StopAgent(Exception):
     pass
 
 
+# Stupid-funny verbs for the spinner. The user wants the CLI to feel alive
+# while it thinks, so each turn we pick a random one. Known operations
+# (bash/read_file/write_file/etc) get their own labels — see _TOOL_LABEL.
+_LOADING_VERBS = [
+    "Bamboozling",     # caos divertido
+    "Chunkulating",    # marca de la casa
+    "Neuronizing",     # como si ajustaran neuronas
+    "Loudifying",      # branding del proyecto
+    "Synapsing",       # disparando conexiones
+    "Voltifying",      # eléctrico
+    "Cogitating",      # pensar fancy
+    "Quantumizing",    # ciencia ficción
+    "Pulsating",       # late
+    "Vibesynthing",    # vibras
+]
+_TOOL_LABEL = {
+    "bash":       "Bashing",
+    "ssh":        "Tunneling",
+    "read_file":  "Reading",
+    "write_file": "Writing",
+    "edit_file":  "Modifying",
+    "glob":       "Globbing",
+    "grep":       "Searching",
+    "ls":         "Scanning",
+    "http_get":   "Fetching",
+}
+_SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+
+
+def _pulse_logo_frame(tick: int) -> str:
+    """Return a 4-char rendering of L O U D where the 'L' pulses through
+    intensities so it looks like it's breathing while loading."""
+    # Pulse pattern: 0..7..0 over a slow cycle (10 ticks).
+    pulse = [38, 41, 45, 49, 51, 49, 45, 41, 38, 35][tick % 10]
+    # ANSI 256-color brand greens; brighter shade = higher pulse value.
+    intensities = {35: 22, 38: 28, 41: 34, 45: 76, 49: 119, 51: 154}
+    color_idx = intensities.get(pulse, 119)
+    L = f"\033[38;5;{color_idx}m\033[1mL\033[0m"
+    rest = "\033[38;5;149m\033[1mOUD\033[0m"
+    return f"{L}{rest}"
+
+
+class LoadingSpinner:
+    """Centered, color-pulsing spinner that runs in the background while the
+    model is generating. Caller drives it: start(label) → stop()."""
+    def __init__(self, color: str = ""):
+        self._task: asyncio.Task | None = None
+        self._stop = False
+        self._label = "Thinking"
+
+    def set_label(self, label: str) -> None:
+        self._label = label
+
+    async def _loop(self) -> None:
+        i = 0
+        try:
+            sys.stdout.write("\n")
+            while not self._stop:
+                logo = _pulse_logo_frame(i)
+                frame = _SPINNER_FRAMES[i % len(_SPINNER_FRAMES)]
+                line = f"  {logo} {C.BRAND}{frame}{C.RESET} {C.GRAY}{self._label}…{C.RESET}"
+                # Erase line, redraw.
+                sys.stdout.write("\r\033[2K" + line)
+                sys.stdout.flush()
+                i += 1
+                await asyncio.sleep(0.08)
+        finally:
+            sys.stdout.write("\r\033[2K")
+            sys.stdout.flush()
+
+    def start(self, label: str | None = None) -> None:
+        if label:
+            self._label = label
+        if self._task and not self._task.done():
+            return
+        self._stop = False
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        self._stop = True
+        if self._task:
+            try: await self._task
+            except Exception: pass
+            self._task = None
+
+
 async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
+    import random
     messages.append({"role": "user", "content": user_text})
 
+    spinner = LoadingSpinner()
+
     for iteration in range(cfg["max_iterations"]):
-        cprint(f"\n  · pensando ({cfg['model']})…", C.GRAY)
+        spinner.start(random.choice(_LOADING_VERBS))
         full_text = ""
         had_tool_call = False
         try:
@@ -1096,6 +1369,7 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                     tc_id = event.get("tool_call_id")
                     # Client-side tool execution
                     if name in TOOL_FNS:
+                        await spinner.stop()
                         cprint(f"  → {name}({shorten(json.dumps(args, ensure_ascii=False), 80)})", C.BRAND)
                         decision = request_permission(cfg, name, args)
                         if decision == "stop":
@@ -1116,6 +1390,9 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                         tool_msg = {"role": "tool", "content": result[:8000]}
                         if tc_id: tool_msg["tool_call_id"] = tc_id
                         messages.append(tool_msg)
+                        # Re-arm the spinner for the next model turn with the
+                        # tool-specific label so the user sees what's happening.
+                        spinner.start(_TOOL_LABEL.get(name, name.capitalize()))
                     # Server-side tools (web_search, web_fetch) are handled by the API; we just log them
                     continue
                 if event.get("event") == "tool_result":
@@ -1127,11 +1404,15 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                 if event.get("event") == "enriching":
                     cprint("  · reforzando cerebro en background…", C.YELLOW)
                     continue
+                if event.get("event") == "mode_fallback":
+                    cprint(f"  · local no listo ({event.get('info','?')}) → usando cloud", C.GRAY)
+                    continue
                 if event.get("done"):
                     break
                 chunk = (event.get("message") or {}).get("content", "")
                 if chunk:
                     if not full_text:
+                        await spinner.stop()
                         cprint("", "")
                         stream_reset()
                     full_text += chunk
@@ -1143,8 +1424,11 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                         sys.stdout.write(scrub(chunk))
                         sys.stdout.flush()
         except StopAgent:
+            await spinner.stop()
             cprint("\n  · detenido por el usuario", C.YELLOW)
             return ""
+        finally:
+            await spinner.stop()
 
         # End of stream. If the assistant emitted any text, the turn is done.
         if full_text:
@@ -1278,6 +1562,11 @@ SLASH_HELP = """\
                     · loud-eye (qwen2-vl · imágenes/screenshots)
 /tools              lista las tools que el agente puede llamar
 /permissions        muestra/cambia el modo de permisos (ask/yolo/safe)
+/mode MODE          motor de inferencia: cloud · local · auto
+                    · cloud = api.loud.codes (full brain + RAG)
+                    · local = ollama en TU máquina (cero latencia, sin RAG)
+                    · auto  = local si está arriba, sino cloud
+/setup local        instala Ollama + descarga el modelo local
 /save FILE          exporta la conversación a un archivo .md
 /cwd                imprime el directorio actual
 /login              inicia sesión (abre browser device-flow)
@@ -1337,6 +1626,29 @@ async def repl(cfg: dict) -> None:
                     cfg["permission_mode"] = arg
                     save_config(cfg)
                 cprint(f"  · permisos: {cfg.get('permission_mode')}  (ask/yolo/safe)", C.YELLOW)
+            elif cmd == "/mode":
+                if arg in ("cloud", "local", "auto"):
+                    cfg["mode"] = arg
+                    save_config(cfg)
+                    if arg in ("local", "auto"):
+                        ok, info = await _ollama_local_ready(cfg)
+                        if ok:
+                            cprint(f"  ✓ modo {arg}  ·  {info}", C.GREEN)
+                        else:
+                            cprint(f"  · modo {arg}  ·  ⚠ {info}", C.YELLOW)
+                            cprint(f"    Corre: loud setup local", C.GRAY)
+                    else:
+                        cprint(f"  · modo {arg}", C.YELLOW)
+                else:
+                    ok, info = await _ollama_local_ready(cfg)
+                    cprint(f"  · modo actual: {cfg.get('mode','cloud')}", C.YELLOW)
+                    cprint(f"  · local: {'arriba' if ok else 'abajo'} ({info})", C.GRAY)
+                    cprint(f"  · uso: /mode cloud  ·  /mode local  ·  /mode auto", C.GRAY)
+            elif cmd == "/setup":
+                if arg.strip() == "local":
+                    await cmd_setup_local(cfg)
+                else:
+                    cprint("  · uso: /setup local", C.YELLOW)
             elif cmd == "/cwd":
                 cprint(f"  · {Path.cwd()}", C.YELLOW)
             elif cmd == "/login":
@@ -1412,7 +1724,7 @@ async def main_async(args: argparse.Namespace) -> int:
         save_config(cfg)
 
     # Subcommands
-    if args.question and args.question[0] in ("login", "logout", "whoami", "update", "version"):
+    if args.question and args.question[0] in ("login", "logout", "whoami", "update", "version", "setup", "mode"):
         sub = args.question[0]
         if sub == "login":
             ok = await cmd_login(cfg)
@@ -1426,6 +1738,24 @@ async def main_async(args: argparse.Namespace) -> int:
             return await cmd_update(cfg)
         if sub == "version":
             cprint(f"  · loud {__version__}", C.BRAND)
+            return 0
+        if sub == "setup":
+            target = (args.question[1] if len(args.question) > 1 else "").lower()
+            if target == "local":
+                return await cmd_setup_local(cfg)
+            cprint("  · uso: loud setup local", C.YELLOW)
+            return 1
+        if sub == "mode":
+            target = (args.question[1] if len(args.question) > 1 else "").lower()
+            if target in ("cloud", "local", "auto"):
+                cfg["mode"] = target
+                save_config(cfg)
+                ok, info = await _ollama_local_ready(cfg)
+                cprint(f"  · mode={target} · local={'up' if ok else 'down'} ({info})", C.GREEN)
+                return 0
+            ok, info = await _ollama_local_ready(cfg)
+            cprint(f"  · mode actual: {cfg.get('mode','cloud')} · local: {info}", C.YELLOW)
+            cprint(f"  · uso: loud mode cloud|local|auto", C.GRAY)
             return 0
 
     if args.reset:
@@ -1457,6 +1787,9 @@ def main() -> int:
     parser.add_argument("--reset", action="store_true", help="Borrar historial de la sesión")
     parser.add_argument("--model", help="Modelo: loud-go · loud-pro · loud-ultra · loud-2.0 · loud-eye (visión)")
     parser.add_argument("--api-url", help="Override del servidor LOUD")
+    parser.add_argument("--local",  action="store_true", help="Forzar modo local (Ollama 127.0.0.1)")
+    parser.add_argument("--cloud",  action="store_true", help="Forzar modo cloud (api.loud.codes)")
+    parser.add_argument("--auto",   action="store_true", help="Modo híbrido: local si está arriba, sino cloud")
     parser.add_argument("--version", action="version", version=f"loud {__version__}")
     args = parser.parse_args()
     try:
