@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.1.5"
+__version__ = "1.1.6"
 
 # ───────────────────── Config ─────────────────────
 
@@ -606,7 +606,7 @@ def request_permission(cfg: dict, tool: str, args: dict) -> str:
 
 # ───────────────────── Tools ─────────────────────
 
-def _validate_bash_complexity(cmd: str) -> str | None:
+def _validate_bash_complexity(cmd: str, allow_long_running: bool = False) -> str | None:
     """Hard ceiling on how much a single bash call can do. The model must
     decompose multi-step work into separate tool calls — we won't run a
     megachain even if asked. Returns None when ok, or an error string the
@@ -645,17 +645,20 @@ def _validate_bash_complexity(cmd: str) -> str | None:
             "hacé tres bash separados."
         )
     low = stripped.lower()
-    # Reject blocking long-running commands — these must go through
-    # `bash_background` so the CLI doesn't hang on the subprocess.
-    for pat in BASH_BLOCKING_PATTERNS:
-        if re.search(pat, low):
-            return (
-                f"ERROR rechazado por el CLI: este comando parece ser un proceso "
-                f"de larga duración (server/watcher/tunnel) que va a colgar el bash. "
-                f"Usá la tool `bash_background(cmd, label)` en vez de `bash` para "
-                f"que el CLI lo lance desprendido y vos podás seguir trabajando. "
-                f"Pattern matched: {pat}"
-            )
+    # Reject blocking long-running commands when called via `bash`. They MUST
+    # go through `bash_background` so the CLI doesn't hang on the subprocess.
+    # When the caller IS `bash_background` (allow_long_running=True), skip
+    # this check — backgrounding is exactly the right place for these.
+    if not allow_long_running:
+        for pat in BASH_BLOCKING_PATTERNS:
+            if re.search(pat, low):
+                return (
+                    f"ERROR rechazado por el CLI: este comando parece ser un proceso "
+                    f"de larga duración (server/watcher/tunnel) que va a colgar el bash. "
+                    f"Usá la tool `bash_background(cmd, label)` en vez de `bash` para "
+                    f"que el CLI lo lance desprendido y vos podás seguir trabajando. "
+                    f"Pattern matched: {pat}"
+                )
     # Phase keywords — rough but useful for the small qwen models.
     phase_words = ["install", "clone", "mkdir", "serve", "start", "expose", "ngrok http"]
     matched = [w for w in phase_words if re.search(rf"\b{re.escape(w)}\b", low)]
@@ -707,7 +710,8 @@ async def tool_bash_background(cmd: str, label: str) -> str:
     can `tail` it later via read_file or bash. Metadata in <label>.json."""
     if not label or not label.strip():
         return "ERROR: label requerido (ej: 'http-1002', 'ngrok', 'build')"
-    err = _validate_bash_complexity(cmd)
+    # Backgrounding allows long-running by definition — don't reject server patterns.
+    err = _validate_bash_complexity(cmd, allow_long_running=True)
     if err: return err
     log_path = _job_path(label)
     meta_path = _job_meta_path(label)
