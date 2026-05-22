@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 # ───────────────────── Config ─────────────────────
 
@@ -263,6 +263,80 @@ DESTRUCTIVE_BASH_PATTERNS = [
     r"\bbrew\s+uninstall",
 ]
 
+# Patterns that touch SYSTEM-level surface. These still prompt in --yolo mode
+# because they can brick the machine, cost real money, or punch holes in the
+# user's perimeter. The user asked: "que yolo unicamente se pase largo si no
+# requiere permisos del sistema". This is the list.
+SYSTEM_DESTRUCTIVE_PATTERNS = [
+    r"\bsudo\b",
+    r"\brm\s+-rf\s+(?:/(?!tmp/|var/folders/|private/tmp/)|~)",   # rm -rf outside /tmp
+    r"\bchmod\s+-R\b",
+    r"\bchown\s+-R\b",
+    r"\bgit\s+push\s+.*--force",
+    r"\bbrew\s+uninstall\b",
+    r"\b(apt|apt-get|pacman|yum|dnf)\s+(install|remove|uninstall|purge)\b",
+    r"\bdd\s+.*\bof=/dev/",
+    r"\bmkfs\.",
+    r"\biptables\b",
+    r"\bpfctl\b",
+    r"\blaunchctl\b",
+    r"\bnetwork(setup|ctl)\b",
+    r"\bsystemctl\s+(start|stop|enable|disable|restart)\b",
+    r"\b(open|listen)\s+(port|puerto)\b",          # firewall punch
+    r"\bufw\b",
+    # Touching files in system-owned roots
+    r"\s+(/etc/|/System/|/Library/(?!Application)|/var/(?!folders/)|/opt/|/usr/(?!local/)|/bin/|/sbin/|/private/var/|/Applications/)",
+]
+
+# System-owned path prefixes for write/edit_file. Even in yolo we prompt.
+SYSTEM_PATH_PREFIXES = (
+    "/etc/", "/System/", "/var/", "/opt/", "/usr/", "/bin/", "/sbin/",
+    "/private/var/", "/Applications/",
+)
+
+# Long-running server patterns. If the model tries to run these via plain
+# `bash`, the tool rejects them and tells the model to use bash_background.
+BASH_BLOCKING_PATTERNS = [
+    r"\bpython\d?\s+-m\s+http\.server\b",
+    r"\bpython\d?\s+-m\s+SimpleHTTPServer\b",
+    r"\bngrok\s+(http|tcp|tls)\b",
+    r"\bnode\s+\S*\.js\b",
+    r"\bnpm\s+(run|start)\b",
+    r"\byarn\s+(run|start|dev)\b",
+    r"\bpnpm\s+(run|dev|start)\b",
+    r"\b(uvicorn|gunicorn|hypercorn|daphne)\b",
+    r"\b(flask|fastapi|django-admin)\s+runserver\b",
+    r"\b(rails|bundle exec rails)\s+(s|server)\b",
+    r"\b(php|php -S)\b",
+    r"\bcaddy\s+(run|start)\b",
+    r"\bnginx\s*-g\b",
+    r"\btail\s+-[fF]\b",
+    r"\bwatch\b",
+    r"\binotifywait\b",
+    r"\b(docker|kubectl)\s+(logs|attach|exec)\s+-[itfIT]+\b",
+]
+
+
+def is_system_destructive(tool: str, args: dict) -> bool:
+    """Stricter than is_destructive — these things prompt the user EVEN in
+    --yolo mode. The point: an unattended yolo agent can flow through 'mkdir
+    /tmp/x && touch index.html' freely, but should pause before `sudo` or
+    touching /etc."""
+    if tool == "ssh":
+        return True
+    if tool == "bash":
+        cmd = (args.get("cmd") or "").strip()
+        return any(re.search(p, cmd, re.IGNORECASE) for p in SYSTEM_DESTRUCTIVE_PATTERNS)
+    if tool in ("write_file", "edit_file"):
+        path = (args.get("path") or "").strip()
+        try:
+            resolved = str(Path(path).expanduser().resolve())
+        except Exception:
+            resolved = path
+        return any(resolved.startswith(p.rstrip("/") + "/") or resolved == p.rstrip("/")
+                   for p in SYSTEM_PATH_PREFIXES)
+    return False
+
 
 def _load_perms() -> dict:
     if not PERMS_FILE.exists():
@@ -374,8 +448,16 @@ def request_permission(cfg: dict, tool: str, args: dict) -> str:
     user picks 'edit'. When the user picks 'always', a sub-selector lets them
     pick the SCOPE of the always-rule (exact / verb / folder / recursive)."""
     mode = cfg.get("permission_mode", "ask")
+    # YOLO: skip prompts for benign + medium-impact, but ALWAYS prompt for
+    # system-level ops (sudo, /etc, force-push, package managers, firewall…).
+    # The user explicitly asked: yolo bypasses only when no system permission
+    # is required. We don't want unattended agents punching holes.
     if mode == "yolo":
-        return "allow"
+        if is_system_destructive(tool, args):
+            cprint("  ⚠ acción a nivel de sistema — yolo NO la salta, te pregunto", C.YELLOW, bold=True)
+            # fall through to interactive prompt
+        else:
+            return "allow"
     # Benign reads (--version, ls, cat, which, ps, git status, pwd, echo…) and
     # all non-state-changing tools auto-allow even in ask mode. Only commands
     # that ACTUALLY mutate state trip the prompt. This is what makes the CLI
@@ -556,6 +638,17 @@ def _validate_bash_complexity(cmd: str) -> str | None:
             "`brew install A && brew install B && python -m http.server &`, "
             "hacé tres bash separados."
         )
+    # Reject blocking long-running commands — these must go through
+    # `bash_background` so the CLI doesn't hang on the subprocess.
+    for pat in BASH_BLOCKING_PATTERNS:
+        if re.search(pat, low):
+            return (
+                f"ERROR rechazado por el CLI: este comando parece ser un proceso "
+                f"de larga duración (server/watcher/tunnel) que va a colgar el bash. "
+                f"Usá la tool `bash_background(cmd, label)` en vez de `bash` para "
+                f"que el CLI lo lance desprendido y vos podás seguir trabajando. "
+                f"Pattern matched: {pat}"
+            )
     # Phase keywords — rough but useful for the small qwen models.
     phase_words = ["install", "clone", "mkdir", "serve", "start", "expose", "ngrok http"]
     low = stripped.lower()
