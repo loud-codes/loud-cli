@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 # ───────────────────── Config ─────────────────────
 
@@ -710,29 +710,44 @@ async def tool_bash_background(cmd: str, label: str) -> str:
     can `tail` it later via read_file or bash. Metadata in <label>.json."""
     if not label or not label.strip():
         return "ERROR: label requerido (ej: 'http-1002', 'ngrok', 'build')"
-    # Backgrounding allows long-running by definition — don't reject server patterns.
-    err = _validate_bash_complexity(cmd, allow_long_running=True)
+    # Models love to add `nohup …` and trailing `&` to backgrounded commands
+    # because that's the bash idiom — but bash_background ALREADY detaches
+    # via start_new_session. The extra `&` makes bash fork+return so our
+    # wrapper PID dies immediately and the real process becomes a ghost we
+    # can't track. Strip both forms here, log a hint so the model learns.
+    clean_cmd = cmd.strip()
+    stripped_notes: list[str] = []
+    m = re.match(r"^\s*nohup\s+(.+?)\s*$", clean_cmd, re.DOTALL)
+    if m:
+        clean_cmd = m.group(1)
+        stripped_notes.append("removed leading `nohup` (bash_background handles SIGHUP)")
+    # Strip trailing `&` and any redirects we'll add ourselves later.
+    clean_cmd = re.sub(r"\s+(?:>\s*\S+|2>&1|>&\d+)+\s*", " ", clean_cmd)
+    if re.search(r"&\s*$", clean_cmd):
+        clean_cmd = re.sub(r"\s*&\s*$", "", clean_cmd)
+        stripped_notes.append("removed trailing `&` (bash_background already detaches)")
+    err = _validate_bash_complexity(clean_cmd, allow_long_running=True)
     if err: return err
     log_path = _job_path(label)
     meta_path = _job_meta_path(label)
     try:
-        # Open log file and pass its FD to Popen so the child inherits it. No
-        # extra `&` wrapping — `start_new_session=True` already detaches the
-        # child from our process group, so SIGHUP from us doesn't kill it.
         log_fh = open(log_path, "w")
+        # `exec` makes bash replace itself with the actual command — proc.pid
+        # then IS the real command's pid, not a dying wrapper shell.
         proc = subprocess.Popen(
-            _shell_args(cmd),
+            ["bash", "-c", f"exec {clean_cmd}"],
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
         )
-        log_fh.close()                       # parent closes; child still has it
+        log_fh.close()
         await asyncio.sleep(0.4)
-        wrapper_pid = proc.pid               # this is bash (or whatever shell), the child of which is `cmd`
+        wrapper_pid = proc.pid               # now the actual command pid via `exec`
         meta = {
             "label": label,
-            "cmd": cmd,
+            "cmd": clean_cmd,
+            "original_cmd": cmd,
             "log": str(log_path),
             "wrapper_pid": wrapper_pid,
             "started_at": time.time(),
@@ -743,12 +758,17 @@ async def tool_bash_background(cmd: str, label: str) -> str:
         early = ""
         try: early = log_path.read_text()[:1200]
         except Exception: pass
+        alive = _is_pid_running(wrapper_pid)
+        notes = ""
+        if stripped_notes:
+            notes = "  cleaned: " + "; ".join(stripped_notes) + "\n"
         return (
             f"job '{label}' started\n"
-            f"  cmd: {cmd}\n"
+            f"  cmd: {clean_cmd}\n"
+            f"{notes}"
             f"  log: {log_path}\n"
-            f"  pid (wrapper): {wrapper_pid}\n"
-            f"  early output:\n{early or '(nothing yet)'}"
+            f"  pid: {wrapper_pid}  ({'alive' if alive else 'EXITED — check the log for the error'})\n"
+            f"  early output:\n{early or '(nothing yet — server may need a moment to bind)'}"
         )
     except Exception as e:
         return f"ERROR: {type(e).__name__}: {e}"
@@ -2429,21 +2449,26 @@ SLASH_HELP = """\
 
 
 async def repl(cfg: dict) -> None:
+    """Fresh REPL launch — generates a new chat_id, renders the banner, and
+    drops the user into an interactive loop with an empty conversation."""
     import uuid as _uuid
-    sys_prompt = STATIC_SYSTEM_PROMPT
-    messages = [{"role": "system", "content": sys_prompt}]
-    # Each `loud` launch is a FRESH chat. Nothing is loaded from disk and
-    # nothing is auto-saved when the REPL exits. The user explicitly invokes
-    # /save <file> to export, and /open <file> to import a prior conversation.
-    # This matches the privacy model: terminal chats are ephemeral by default.
+    messages = [{"role": "system", "content": STATIC_SYSTEM_PROMPT}]
     cfg["_chat_id"] = f"repl-{_uuid.uuid4().hex[:12]}"
     # Wipe any stale session file from a pre-0.8.4 install.
     if SESSION_FILE.exists():
         try: SESSION_FILE.unlink()
         except Exception: pass
+    await _repl_loop(cfg, messages, render_initial_banner=True)
 
-    sys.stdout.write(render_banner(cfg))
-    sys.stdout.flush()
+
+async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: bool = True) -> None:
+    """The interactive loop, factored out so one-shot prompts can seed the
+    history and then drop into the REPL without re-rendering the banner."""
+    import uuid as _uuid
+    sys_prompt = STATIC_SYSTEM_PROMPT
+    if render_initial_banner:
+        sys.stdout.write(render_banner(cfg))
+        sys.stdout.flush()
 
     while True:
         try:
@@ -2717,13 +2742,21 @@ async def main_async(args: argparse.Namespace) -> int:
             return 0
 
     if args.question:
-        # One-shot calls are ALWAYS fresh — no session history, no save.
-        # Mixing past turns into a one-off `loud "hola"` was leaking old
-        # context into unrelated questions.
+        # `loud "<prompt>"` is treated as the FIRST message of an open REPL
+        # session — we run the turn, then drop into the interactive loop so
+        # the user can follow up without re-launching loud. Use --exit to opt
+        # back into the old one-shot-and-quit behavior (CI / scripts).
         import uuid as _uuid
-        cfg["_chat_id"] = f"oneshot-{_uuid.uuid4().hex[:12]}"
+        cfg["_chat_id"] = f"repl-{_uuid.uuid4().hex[:12]}"
         messages = [{"role": "system", "content": STATIC_SYSTEM_PROMPT}]
+        sys.stdout.write(render_banner(cfg))
+        sys.stdout.flush()
+        cprint(f"loud❯ {' '.join(args.question)}", C.BRAND, bold=True)
         await run_turn(cfg, messages, " ".join(args.question))
+        if getattr(args, "exit_after", False):
+            return 0
+        # Continue into the REPL with the seeded history.
+        await _repl_loop(cfg, messages, render_initial_banner=False)
         return 0
 
     await repl(cfg)
@@ -2746,6 +2779,8 @@ def main() -> int:
     parser.add_argument("--dangerously-skip-permissions", "--yolo", action="store_true",
                         dest="yolo",
                         help="Salta TODOS los prompts de permiso (sin pedir [y/n] para nada). Igual de peligroso que suena.")
+    parser.add_argument("--exit-after", action="store_true", dest="exit_after",
+                        help="Sale después del prompt one-shot (CI/scripts). Por default loud queda en REPL.")
     parser.add_argument("--version", action="version", version=f"loud {__version__}")
     args = parser.parse_args()
     try:
