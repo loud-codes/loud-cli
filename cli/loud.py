@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 # ───────────────────── Config ─────────────────────
 
@@ -54,7 +54,11 @@ PERMS_FILE = LOUD_DIR / "permissions.json"
 
 DEFAULT_CONFIG = {
     "api_url": "https://api.loud.codes",
-    "model": "loud-go",
+    # loud-pro (qwen 7B) is the new default — loud-go (3B) was too small for
+    # multi-step task planning. Pro reasons cleanly through bash_background →
+    # curl → report flows without spawning duplicate processes or looping on
+    # job_status. Users can downshift with --model loud-go for raw speed.
+    "model": "loud-pro",
     "max_iterations": 50,    # multi-step plans + self-recovery on errors need room
     "permission_mode": "ask",      # ask | yolo | safe (safe = block destructive ops)
     "typewriter": True,
@@ -1248,6 +1252,24 @@ Si el pedido tiene ≥3 acciones (instalar X, arrancar Y, exponer Z):
 3. Después del resultado decidís el siguiente.
 
 NUNCA intentes "hacer todo de un solo embriónazo". Pasitos chicos, observación entre cada uno. Esa es la diferencia entre un asistente real y un script roto que se cae al primer error.
+
+## 4ca. ANTI-PATRONES — cosas que NUNCA hagas
+Estas son trampas en las que los modelos chicos caen. Evitálas o el agente loop te va a cortar:
+
+- **NO llames `job_status` más de UNA VEZ seguida.** Si el job está alive en el primer check, ya está. No hagas 5 status checks en fila — eso es loop. La siguiente tool después de un job vivo debe ser la VERIFICACIÓN REAL del efecto (curl, ps, ls del output, leer un log).
+- **NO arranques un segundo server / segundo job sin que el usuario te lo haya pedido.** Si arrancaste `http-1005` y verificás, la respuesta es responderle al usuario, NO arrancar `http-1006`.
+- **NO inventes URLs, PIDs, comandos.** Si necesitás un dato del job, leelo del retorno de `bash_background` o `job_status`. No alucines "el PID es 1234".
+- **NO llames `ask_oracle` para cosas que `bash` resuelve.** "qué versión de python", "cuál es el path de X", "listame la carpeta" → eso es `bash`, no oracle.
+- **NO termines con prosa fantasiosa.** Si no hiciste curl, no digas "el server está respondiendo". Si no leíste el log, no inventes su contenido. Decí solo lo que VERIFICASTE con una tool.
+- **NO vuelvas a un paso ya terminado.** Si write_file devolvió "wrote 30 bytes", el archivo está. No lo vuelvas a escribir "para asegurar". Avanzá.
+
+Después de `bash_background`, tu próxima tool casi siempre es **una sola** de estas:
+- `bash("curl -fsSL http://127.0.0.1:<port>/")` si arrancaste un server HTTP
+- `bash("ps -p <pid>")` si querés confirmar que el proceso vive
+- `read_file("/path/to/log")` si querés ver qué imprimió
+- `job_status("<label>", tail_lines=20)` UNA SOLA VEZ si querés ver el log + estado
+
+Después del `curl` exitoso → mensaje final corto al usuario con URL + PID + body. SE ACABÓ EL TURNO.
 
 ## 4cb. `ask_oracle` cuando NO sepas cómo resolver un error del OS
 Tenés acceso a una tool privada `ask_oracle(question)` que consulta el oráculo interno (Gemini) por una respuesta concreta a una pregunta técnica. **No se almacena en ningún lado** — es lookup en tiempo real. La idea: si tras 2 intentos seguís sin saber CÓMO arreglar un error real del OS (mensaje raro, flag que no recordás, comando específico de la versión del usuario, herramienta exótica), preguntale al oráculo en vez de quedarte trabado o devolverle al usuario una pelota que vos podés resolver.
