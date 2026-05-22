@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 # ───────────────────── Config ─────────────────────
 
@@ -638,6 +638,7 @@ def _validate_bash_complexity(cmd: str) -> str | None:
             "`brew install A && brew install B && python -m http.server &`, "
             "hacé tres bash separados."
         )
+    low = stripped.lower()
     # Reject blocking long-running commands — these must go through
     # `bash_background` so the CLI doesn't hang on the subprocess.
     for pat in BASH_BLOCKING_PATTERNS:
@@ -651,7 +652,6 @@ def _validate_bash_complexity(cmd: str) -> str | None:
             )
     # Phase keywords — rough but useful for the small qwen models.
     phase_words = ["install", "clone", "mkdir", "serve", "start", "expose", "ngrok http"]
-    low = stripped.lower()
     matched = [w for w in phase_words if re.search(rf"\b{re.escape(w)}\b", low)]
     if len(matched) >= 2 and op_count >= 1:
         return (
