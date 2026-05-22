@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # ───────────────────── Config ─────────────────────
 
@@ -612,20 +612,21 @@ async def tool_bash_background(cmd: str, label: str) -> str:
     if err: return err
     log_path = _job_path(label)
     meta_path = _job_meta_path(label)
-    # `nohup` + setsid keeps the child alive after the CLI exits.
-    full = f"nohup {cmd} > '{log_path}' 2>&1 &"
     try:
+        # Open log file and pass its FD to Popen so the child inherits it. No
+        # extra `&` wrapping — `start_new_session=True` already detaches the
+        # child from our process group, so SIGHUP from us doesn't kill it.
+        log_fh = open(log_path, "w")
         proc = subprocess.Popen(
-            _shell_args(full),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            _shell_args(cmd),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
+            close_fds=True,
         )
-        # The Popen pid is the shell wrapper; the actual child runs detached.
-        # Best-effort: poll `ps` for the most recent matching command to find
-        # the real PID. Keep it simple: store both.
+        log_fh.close()                       # parent closes; child still has it
         await asyncio.sleep(0.4)
-        wrapper_pid = proc.pid
+        wrapper_pid = proc.pid               # this is bash (or whatever shell), the child of which is `cmd`
         meta = {
             "label": label,
             "cmd": cmd,
