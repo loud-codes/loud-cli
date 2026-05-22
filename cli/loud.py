@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 # ───────────────────── Config ─────────────────────
 
@@ -995,7 +995,6 @@ def render_banner(cfg: dict) -> str:
         out.append(row(f"{D}status:{R}  {Y}● not signed in{R}  {D}— type {R}{B}{G}/login{R}{D} to start{R}"))
     out.append(row(f"{D}model:{R}   {G}{cfg['model']}{R}    {D}perms:{R}  {G}{cfg.get('permission_mode', 'ask')}{R}"))
     out.append(row(f"{D}cwd:{R}     {cwd}"))
-    out.append(row(f"{D}server:{R}  {cfg['api_url']}"))
     out.append(blank)
     out.append(sep)
     out.append(blank)
