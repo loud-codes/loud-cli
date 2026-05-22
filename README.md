@@ -98,6 +98,7 @@ First run walks you through a 30-second setup: confirm the server URL, pick a pe
 │   sesión:  ceo@loud.codes · admin                          │
 │   modelo:  loud-go   permisos:  ask                        │
 │   cwd:     ~/my-project                                    │
+│   web:     https://loud.codes                              │
 │                                                            │
 │   /help para comandos · Esc detiene el agente · Ctrl+C sale│
 │                                                            │
