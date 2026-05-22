@@ -291,6 +291,15 @@ brew uninstall loud
 
 ## Changelog
 
+### v0.6.0 — Browser-based device login · 2026-05-22
+
+- 🔐 **`loud login` ya no pide contraseña en la terminal** — usa device flow OAuth-style.
+  Abre el browser (o muestra el URL para copiar/pegar), tú apruebas la sesión en la
+  web, y el CLI recibe el JWT sin que nunca escribas el password en la terminal.
+- ⚡ Tres endpoints nuevos en el backend: `/v1/auth/cli/init`, `/cli/approve`, `/cli/poll`
+- 🖼️ Página `loud.codes/cli` para aprobar sesiones con verificación de código (anti-CSRF)
+- Funciona igual que `gh auth login` o `claude auth` — la UX que ya conoces
+
 ### v0.5.0 — Vision + authority · 2026-05-22
 
 - 👁️ **Vision live in production** — drop any `.jpg/.png/.webp/.gif/.bmp` into
