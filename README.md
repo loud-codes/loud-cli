@@ -1,132 +1,186 @@
 <div align="center">
 
 ```
-  ██╗      ██████╗ ██╗   ██╗██████╗
-  ██║     ██╔═══██╗██║   ██║██╔══██╗
-  ██║     ██║   ██║██║   ██║██║  ██║
-  ██║     ██║   ██║██║   ██║██║  ██║
-  ███████╗╚██████╔╝╚██████╔╝██████╔╝
-  ╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝
+                ██╗      ██████╗ ██╗   ██╗██████╗
+                ██║     ██╔═══██╗██║   ██║██╔══██╗
+                ██║     ██║   ██║██║   ██║██║  ██║
+                ██║     ██║   ██║██║   ██║██║  ██║
+                ███████╗╚██████╔╝╚██████╔╝██████╔╝
+                ╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝
 ```
 
-**Terminal-first AI agent · self-hosted · cross-platform**
+### **A terminal-first AI agent that lives on _your_ infrastructure.**
 
-[loud.codes](https://loud.codes) · [README en español](README.es.md)
+The model is yours. The data is yours. The terminal is yours.
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-a2cd65?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.3.0-a2cd65?style=flat-square)](#)
+[![Python](https://img.shields.io/badge/python-3.10+-a2cd65?style=flat-square&logo=python&logoColor=white)](#)
+[![Platform](https://img.shields.io/badge/macOS%20·%20Linux%20·%20Windows-success-a2cd65?style=flat-square)](#)
+[![loud.codes](https://img.shields.io/badge/web-loud.codes-a2cd65?style=flat-square)](https://loud.codes)
+
+[Install](#install) · [Quickstart](#quickstart) · [Tools](#tools) · [Permissions](#permissions) · [Self-host](https://loud.codes) · [README en español](README.es.md)
 
 </div>
 
-LOUD is a private AI that runs on your own infrastructure and follows you into the terminal. Same idea as Claude Code or Cursor, but the model lives on **your** server — no third-party data flow.
+---
 
-The `loud` CLI is the on-machine agent. It:
+## What is this
 
-- talks to your LOUD API over the network,
-- holds a streaming conversation with token-by-token typewriter rendering,
-- reads, writes, and edits files on your machine,
-- runs shell commands (with permission prompts on destructive ones),
-- SSHes into your servers.
+**LOUD** is a private AI that runs on infrastructure you own. The `loud` CLI is the on-machine half — it lives in your shell, talks to your LOUD server over the network, and acts as a coding agent that can read, edit, and run things on your computer with explicit consent.
 
-LOUD is **invite-only** while it's in private beta — you need an account on a running LOUD server before the CLI is useful.
+Think Claude Code or Cursor, but the model never leaves your data center.
+
+```
+┌──────────────┐         ┌──────────────────┐         ┌─────────────────┐
+│  your shell  │ ──────▶ │   loud CLI       │ ──────▶ │  your LOUD api  │
+│              │         │  (local agent)   │         │  (your server)  │
+│  ↑ output    │ ◀────── │  read/write/run  │ ◀────── │  qwen / RAG /   │
+│              │         │  with permission │         │  memory         │
+└──────────────┘         └──────────────────┘         └─────────────────┘
+```
+
+The CLI does not phone home. Every byte goes to the LOUD server you point it at (default `https://api.loud.codes`, or your own at `loud --api-url https://yours.example.com`).
 
 ---
 
 ## Install
 
-### macOS / Linux — one-liner
+> LOUD is **invite-only** while in private beta. You need a user account on a running LOUD server before the CLI is useful. Get an invite at [loud.codes](https://loud.codes).
+
+### macOS · Linux
 
 ```bash
 curl -fsSL https://loud.codes/install.sh | bash
 ```
 
-### macOS — Homebrew
+### macOS (Homebrew)
 
 ```bash
 brew tap loud-codes/cli
 brew install loud
 ```
 
-### Windows — PowerShell
+### Windows (PowerShell)
 
 ```powershell
 iwr -useb https://loud.codes/install.ps1 | iex
 ```
 
-### Manual
+### From source
 
 ```bash
-git clone https://github.com/loud-codes/loud-cli.git ~/.loud/install/src
+git clone https://github.com/loud-codes/loud-cli ~/.loud/install/src
 python3 -m venv ~/.loud/install/venv
 ~/.loud/install/venv/bin/pip install httpx
-echo '#!/usr/bin/env bash
-exec ~/.loud/install/venv/bin/python3 ~/.loud/install/src/cli/loud.py "$@"' > ~/.local/bin/loud
+printf '#!/usr/bin/env bash\nexec ~/.loud/install/venv/bin/python3 ~/.loud/install/src/cli/loud.py "$@"\n' > ~/.local/bin/loud
 chmod +x ~/.local/bin/loud
 ```
 
 ---
 
-## First run
+## Quickstart
 
 ```
 $ loud
 ```
 
-The CLI walks you through a 30-second setup: it confirms the server URL (default `https://api.loud.codes`), asks you to pick a permission mode (`ask` / `yolo` / `safe`), and logs you in with your LOUD username (or email) + password. After that you land in an interactive REPL with a status panel and the `loud❯` prompt.
+First run walks you through a 30-second setup: confirm the server URL, pick a permission mode (`ask` / `yolo` / `safe`), and log in. After that you land in a Claude-Code-style REPL.
 
----
+```
+╭────────────────────────────────────────────────────────────╮
+│                                                            │
+│   ██╗      ██████╗ ██╗   ██╗██████╗                        │
+│   ██║     ██╔═══██╗██║   ██║██╔══██╗                       │
+│   ██║     ██║   ██║██║   ██║██║  ██║                       │
+│   ██║     ██║   ██║██║   ██║██║  ██║                       │
+│   ███████╗╚██████╔╝╚██████╔╝██████╔╝                       │
+│   ╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝                        │
+│                                                            │
+│   ✻ Welcome to LOUD — terminal-first AI                    │
+│                                                            │
+│   sesión:  you@example.com · admin                         │
+│   modelo:  loud-go   permisos:  ask                        │
+│   cwd:     ~/my-project                                    │
+│   server:  https://api.loud.codes                          │
+│                                                            │
+│   /help para comandos · Esc detiene el agente · Ctrl+C sale│
+│                                                            │
+╰────────────────────────────────────────────────────────────╯
 
-## Daily usage
+loud❯ refactor utils.py so the parsing logic is in a separate module
+```
+
+### Daily usage
 
 ```bash
 loud                              # interactive REPL
-loud "fix the test that broke"    # one-shot
-loud login
-loud logout
-loud whoami
-loud --model loud-pro             # switch model: loud-go | loud-pro | loud-ultra
+loud "explain the bug in app.py"  # one-shot prompt
+loud login                        # auth
+loud whoami                       # check session
+loud --model loud-pro             # switch model: loud-go · loud-pro · loud-ultra
 loud --reset                      # clear session history
+loud update                       # self-update
 loud --version
 ```
 
-### Slash commands (inside the REPL)
+### Slash commands inside the REPL
 
-| Command | Description |
+| | |
 |---|---|
 | `/help` | list commands |
-| `/reset` | clear conversation history |
-| `/model NAME` | switch model (`loud-go`, `loud-pro`, `loud-ultra`) |
-| `/tools` | list tools the agent can call |
-| `/permissions [ask\|yolo\|safe]` | view or change permission mode |
+| `/reset` | clear history |
+| `/model NAME` | switch model |
+| `/tools` | list available tools |
+| `/permissions [ask\|yolo\|safe]` | view / change permission mode |
 | `/save FILE` | export conversation to markdown |
 | `/cwd` | print current directory |
 | `/exit` | quit |
 
 ---
 
-## Tools the agent can use locally
+## Tools
 
-| Tool | What it does | Permission gate |
-|---|---|---|
-| `bash` | run a shell command | yes for `rm`, `mv`, `sudo`, `curl \| sh`, `git push --force`, `terraform`, … |
-| `ssh` | run a command on a remote host | always |
-| `read_file` | read a text file | no |
-| `write_file` | create or overwrite a file | always |
-| `edit_file` | replace the first occurrence of `old` with `new` | always |
-| `glob` | list files matching a pattern | no |
-| `grep` | recursive search (uses ripgrep if installed) | no |
-| `ls` | show pwd + directory contents | no |
-| `http_get` | fetch a URL body | no |
+The agent has full access to your machine through these tools. Destructive operations are gated by the [permission system](#permissions).
 
-### Permission modes
+| Tool | Description | Permission |
+|---|---|:---:|
+| **`bash`** | Run a shell command on the local machine. | 🔐 |
+| **`ssh`** | Run a command on a remote host. | 🔐 |
+| **`read_file`** | Read a text file. | ✅ |
+| **`write_file`** | Create or overwrite a file. | 🔐 |
+| **`edit_file`** | Replace first occurrence of `old` with `new`. | 🔐 |
+| **`glob`** | Find files matching a pattern. | ✅ |
+| **`grep`** | Recursive search (uses ripgrep if installed). | ✅ |
+| **`ls`** | Show `pwd` + directory contents. | ✅ |
+| **`http_get`** | Fetch the body of a URL. | ✅ |
 
-- **ask** (default): every destructive call shows the command and asks `[y]es / [n]o / [a]lways / [s]top`. `always` is remembered per command-prefix and per directory in `~/.loud/permissions.json`.
-- **yolo**: never asks. Use only on a fresh machine you control.
-- **safe**: refuses every destructive tool. Read-only agent.
+The CLI auto-detects destructive `bash` commands by pattern (`rm -rf`, `sudo`, `curl | sh`, `git push --force`, `terraform destroy`, etc.) and prompts even in default mode.
 
-State is kept in `~/.loud/`:
+---
+
+## Permissions
+
+Three modes, set during first-run setup or with `/permissions <mode>`:
+
+```
+┌──────┬─────────────────────────────────────────────────────────────────┐
+│ ask  │ prompts on every destructive call (default, recommended)        │
+│      │ [y]es · [n]o · [a]lways · [s]top                                │
+│      │ "always" is cached per command-prefix + per directory           │
+├──────┼─────────────────────────────────────────────────────────────────┤
+│ yolo │ never asks, executes everything (use only on disposable boxes)  │
+├──────┼─────────────────────────────────────────────────────────────────┤
+│ safe │ refuses every destructive tool — read-only agent                │
+└──────┴─────────────────────────────────────────────────────────────────┘
+```
+
+State lives in:
 
 ```
 ~/.loud/
-├── auth.json           # JWT + user
-├── config.json         # api_url, model, permission_mode, …
+├── auth.json           # JWT + user        (0600 on Unix)
+├── config.json         # api_url, model, permission_mode
 ├── permissions.json    # cached "always allow" decisions
 └── current_session.json
 ```
@@ -137,33 +191,64 @@ State is kept in `~/.loud/`:
 
 The CLI exposes three aliases that map to whatever the backend has loaded:
 
-| Alias | Backs onto | Use for |
+| Alias | Default backing | Use for |
 |---|---|---|
-| `loud-go` | qwen2.5:3b | fast chat, quick refactors |
-| `loud-pro` | qwen2.5:7b | reasoning, multi-file edits |
-| `loud-ultra` | qwen2.5:14b | deep refactors, complex debugging |
+| **`loud-go`** | qwen2.5:3b | fast chat, quick refactors |
+| **`loud-pro`** | qwen2.5:7b | reasoning, multi-file edits |
+| **`loud-ultra`** | qwen2.5:14b | deep refactors, complex debugging |
+
+Switch with `loud --model loud-pro` or `/model loud-pro` inside the REPL.
 
 ---
 
 ## Security
 
-- Internal IPs and infra hostnames are scrubbed from every line the CLI prints.
-- All destructive operations go through the permission gate unless you explicitly switched to `yolo`.
+- Internal IPs and infra hostnames are **scrubbed** from every line the CLI prints.
 - Auth lives in `~/.loud/auth.json` with `0600` perms on Unix.
-- The CLI does not phone home — every byte goes to **your** LOUD server.
+- The CLI does **not** phone home. Every byte goes to your LOUD server.
+- The agent never names external model providers in its output.
+- Destructive operations route through the permission gate unless you explicitly opted into `yolo`.
+
+---
+
+## Self-update
+
+```bash
+loud update
+```
+
+The CLI detects how you installed it (Homebrew, curl-installer, git clone) and re-runs the right path. There's also a quiet daily check — if a newer version is available, the welcome banner shows `↑ nueva versión disponible: X — corre 'loud update'`.
 
 ---
 
 ## Uninstall
 
 ```bash
-rm -rf ~/.loud ~/.local/bin/loud   # or loud.cmd on Windows
+rm -rf ~/.loud
+rm   -f ~/.local/bin/loud
+# or
+brew uninstall loud
 ```
-
-(Or `brew uninstall loud` if you used Homebrew.)
 
 ---
 
-## License
+## Roadmap
 
-MIT
+- [x] Streaming responses with typewriter rendering
+- [x] Per-action permission gate with cached "always" decisions
+- [x] Self-update
+- [x] Windows + macOS + Linux installers
+- [ ] Built-in `diff` view for `edit_file` before applying
+- [ ] Multi-file refactor sessions
+- [ ] Local model fallback when the LOUD server is unreachable
+- [ ] Shell completions (zsh / bash / fish / powershell)
+
+---
+
+<div align="center">
+
+**Built for builders who don't want their code to leave the building.**
+
+[loud.codes](https://loud.codes) · MIT license
+
+</div>
