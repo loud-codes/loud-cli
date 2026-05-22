@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.8.4"
+__version__ = "0.8.5"
 
 # ───────────────────── Config ─────────────────────
 
@@ -356,12 +356,16 @@ def _perm_match(perms: dict, tool: str, args: dict) -> str | None:
 
 
 def is_destructive(tool: str, args: dict) -> bool:
-    if tool not in DESTRUCTIVE_TOOLS:
-        return False
+    """True iff this specific invocation actually modifies state. Reading
+    commands (--version, ls, cat, which, ps, etc.) are NOT destructive even
+    though the bash tool itself can be. Always-destructive tools: write_file,
+    edit_file, ssh (remote side effects unknown)."""
+    if tool in ("write_file", "edit_file", "ssh"):
+        return True
     if tool == "bash":
         cmd = (args.get("cmd") or "").strip()
         return any(re.search(p, cmd, re.IGNORECASE) for p in DESTRUCTIVE_BASH_PATTERNS)
-    return True
+    return False
 
 
 def request_permission(cfg: dict, tool: str, args: dict) -> str:
@@ -371,10 +375,14 @@ def request_permission(cfg: dict, tool: str, args: dict) -> str:
     mode = cfg.get("permission_mode", "ask")
     if mode == "yolo":
         return "allow"
-    if mode == "safe" and is_destructive(tool, args):
-        return "deny"
-    if tool not in DESTRUCTIVE_TOOLS:
+    # Benign reads (--version, ls, cat, which, ps, git status, pwd, echo…) and
+    # all non-state-changing tools auto-allow even in ask mode. Only commands
+    # that ACTUALLY mutate state trip the prompt. This is what makes the CLI
+    # feel like a real assistant instead of constantly asking permission.
+    if not is_destructive(tool, args):
         return "allow"
+    if mode == "safe":
+        return "deny"
     perms = _load_perms()
     matched_scope = _perm_match(perms, tool, args)
     if matched_scope:
