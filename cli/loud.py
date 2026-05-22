@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 # ───────────────────── Config ─────────────────────
 
@@ -67,10 +67,10 @@ DEFAULT_CONFIG = {
     "local_ollama_url":   "http://127.0.0.1:11434",
     "local_model":        "qwen2.5:3b",          # ~2GB, runs on any modern laptop
     "local_model_vision": "llama3.2-vision:11b", # only auto-pulled if user opts in
-    # Brain access from terminal: OFF by default. Terminal is direct PC
-    # control + model's training knowledge. The brain (curated knowledge from
-    # the admin web UI) stays on the web side. Toggle with /brain on|off.
-    "use_brain": False,
+    # Brain access is INTENTIONALLY ABSENT from terminal mode. The curated
+    # knowledge base is a web-admin-only feature. From the CLI you get the
+    # model's training knowledge + tools on this machine — nothing else.
+    # This is a hard policy decision; there is no toggle.
 }
 
 
@@ -1143,8 +1143,8 @@ Si no viste un archivo con `read_file` o `ls`, asumí que no existe. Si no corri
 - Código siempre en fences markdown con tag (```python, ```bash, ```js, etc.).
 - Cuando un usuario pida algo "en raw" o "copiable", devolvelo dentro de un fence ```text sin prosa alrededor.
 
-## 11. Privacidad del terminal
-Estás en MODO TERMINAL. No tenés acceso al brain corporativo (ese es para la web admin). Tu conocimiento = tu entrenamiento + lo que descubrís con tools en TIEMPO REAL. No hay contexto traído de chats anteriores ni de otros usuarios. Cada conversación es su propio sandbox.
+## 11. Privacidad del terminal — INVIOLABLE
+Estás en MODO TERMINAL. No tenés acceso al brain corporativo. **Esa función es exclusivamente para la web admin y NO está disponible desde el CLI ni siquiera para usuarios admin** — es una política de privacidad dura, no un toggle. Tu conocimiento = tu entrenamiento + lo que descubrís con tools en TIEMPO REAL. No hay contexto traído de chats anteriores ni de otros usuarios. Cada conversación es su propio sandbox. Si el usuario te pregunta cómo activar el brain desde terminal: respondé que no se puede, que esa función vive solo en la web admin.
 
 ## 12. Cuando NO necesites una tool
 Saludos, preguntas conceptuales abstractas, código que no toca el sistema del usuario, opiniones técnicas — respondé directo sin invocar tools. Las tools son para tocar la máquina, no para chatear.
@@ -1637,10 +1637,10 @@ async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
     ON because the brain has curated knowledge, but the server gates it by
     relevance so casual prompts ('hola') don't trigger spurious context.
 
-    TERMINAL PRIVACY MODEL: the CLI defaults to use_rag=False and use_memory=
+    TERMINAL PRIVACY MODEL: the CLI HARDCODES use_rag=False and use_memory=
     False. Terminal mode = direct PC control + the model's own training
-    knowledge. The brain (curated docs from the admin UI) is reserved for the
-    web app. Power users can opt in by setting cfg.use_brain=true."""
+    knowledge. The brain (curated docs from the admin UI) is web-side only,
+    not exposed to the CLI even for admin users. This is a hard policy."""
     token = get_token()
     if not token:
         yield {"error": "not_logged_in"}
@@ -1650,8 +1650,8 @@ async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
         "messages":   messages,
         "tools":      TOOLS_SCHEMA,
         "chat_id":    cfg.get("_chat_id"),
-        "use_rag":    bool(cfg.get("use_brain", False)),
-        "use_memory": False,
+        "use_rag":    False,    # hardcoded — brain is web-only
+        "use_memory": False,    # hardcoded — no cross-chat leakage
         "use_web":    True,
         "stream":     True,
     }
@@ -2335,15 +2335,7 @@ async def repl(cfg: dict) -> None:
                 else:
                     cprint("  · uso: /setup local", C.YELLOW)
             elif cmd == "/brain":
-                if arg.strip().lower() in ("on", "yes", "true", "1"):
-                    cfg["use_brain"] = True; save_config(cfg)
-                    cprint("  · brain ON — consultas usan conocimiento curado del admin", C.YELLOW)
-                elif arg.strip().lower() in ("off", "no", "false", "0"):
-                    cfg["use_brain"] = False; save_config(cfg)
-                    cprint("  · brain OFF — terminal solo usa el modelo + tools (privacidad)", C.YELLOW)
-                else:
-                    state = "ON" if cfg.get("use_brain") else "OFF"
-                    cprint(f"  · brain: {state}  ·  uso: /brain on|off", C.YELLOW)
+                cprint("  · brain no está disponible desde terminal — esa función es solo para la web admin.", C.YELLOW)
             elif cmd == "/cwd":
                 cprint(f"  · {Path.cwd()}", C.YELLOW)
             elif cmd == "/login":
