@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.7.6"
+__version__ = "0.7.7"
 
 # ───────────────────── Config ─────────────────────
 
@@ -1075,7 +1075,10 @@ async def _stream_chat_local(cfg: dict, messages: list[dict]):
 
 
 async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
-    """Original cloud path — talk to api.loud.codes with full brain, RAG, auto-enrich."""
+    """Original cloud path — talk to api.loud.codes with brain + tools.
+    Memory is OFF by default so old chats can't leak into this one. RAG is
+    ON because the brain has curated knowledge, but the server gates it by
+    relevance so casual prompts ('hola') don't trigger spurious context."""
     token = get_token()
     if not token:
         yield {"error": "not_logged_in"}
@@ -1084,8 +1087,9 @@ async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
         "model": cfg["model"],
         "messages": messages,
         "tools": TOOLS_SCHEMA,
+        "chat_id": cfg.get("_chat_id"),
         "use_rag": True,
-        "use_memory": True,
+        "use_memory": False,
         "use_web": True,
         "stream": True,
     }
@@ -1579,8 +1583,12 @@ SLASH_HELP = """\
 
 
 async def repl(cfg: dict) -> None:
+    import uuid as _uuid
     sys_prompt = STATIC_SYSTEM_PROMPT
     messages = [{"role": "system", "content": sys_prompt}]
+    # Fresh chat_id per REPL launch — guarantees server-side isolation from any
+    # other chat. /reset rotates it; one-shot uses its own.
+    cfg["_chat_id"] = f"repl-{_uuid.uuid4().hex[:12]}"
     history = load_session()
     if history:
         messages.extend(history)
@@ -1611,7 +1619,8 @@ async def repl(cfg: dict) -> None:
             elif cmd == "/reset":
                 reset_session()
                 messages = [{"role": "system", "content": sys_prompt}]
-                cprint("  · historial borrado", C.YELLOW)
+                cfg["_chat_id"] = f"repl-{_uuid.uuid4().hex[:12]}"
+                cprint("  · historial borrado · chat aislado nuevo", C.YELLOW)
             elif cmd == "/model":
                 if arg:
                     cfg["model"] = arg
@@ -1765,12 +1774,13 @@ async def main_async(args: argparse.Namespace) -> int:
             return 0
 
     if args.question:
+        # One-shot calls are ALWAYS fresh — no session history, no save.
+        # Mixing past turns into a one-off `loud "hola"` was leaking old
+        # context into unrelated questions.
+        import uuid as _uuid
+        cfg["_chat_id"] = f"oneshot-{_uuid.uuid4().hex[:12]}"
         messages = [{"role": "system", "content": STATIC_SYSTEM_PROMPT}]
-        history = load_session()
-        if history:
-            messages.extend(history)
         await run_turn(cfg, messages, " ".join(args.question))
-        save_session([m for m in messages if m.get("role") != "system"])
         return 0
 
     await repl(cfg)
