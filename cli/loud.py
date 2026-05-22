@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.7.9"
+__version__ = "0.8.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -1275,12 +1275,76 @@ _TOOL_LABEL = {
     "ssh":        "Tunneling",
     "read_file":  "Reading",
     "write_file": "Writing",
-    "edit_file":  "Modifying",
+    "edit_file":  "Updating",
     "glob":       "Globbing",
     "grep":       "Searching",
-    "ls":         "Scanning",
+    "ls":         "Listing",
     "http_get":   "Fetching",
 }
+
+# Pretty display names for the "● Tool(args)" call header — matches the
+# Claude-Code style. Falls back to the raw tool name when not in this map.
+_TOOL_DISPLAY = {
+    "bash":       "Bash",
+    "ssh":        "SSH",
+    "read_file":  "Read",
+    "write_file": "Write",
+    "edit_file":  "Update",
+    "glob":       "Glob",
+    "grep":       "Search",
+    "ls":         "List",
+    "http_get":   "Fetch",
+}
+
+
+def _format_tool_call_header(name: str, args: dict) -> str:
+    """Render '● Bash(python3 --version)' style header. Args are flattened to
+    a single-line preview that's easy to scan."""
+    display = _TOOL_DISPLAY.get(name, name.capitalize())
+    if name == "bash":
+        arg_str = (args.get("cmd") or "").strip().replace("\n", " ⏎ ")
+    elif name == "ssh":
+        arg_str = f"{args.get('host','?')}: {(args.get('cmd') or '').strip()}"
+    elif name in ("read_file", "write_file", "edit_file"):
+        arg_str = args.get("path", "")
+    elif name == "glob":
+        arg_str = args.get("pattern", "")
+        if args.get("path") and args.get("path") not in (".", ""): arg_str += f" in {args['path']}"
+    elif name == "grep":
+        arg_str = args.get("pattern", "")
+        if args.get("path") and args.get("path") not in (".", ""): arg_str += f" in {args['path']}"
+    elif name == "ls":
+        arg_str = args.get("path") or "."
+    elif name == "http_get":
+        arg_str = args.get("url", "")
+    else:
+        arg_str = json.dumps(args, ensure_ascii=False)
+    return f"{display}({shorten(arg_str, 100)})"
+
+
+def _print_tool_block(name: str, args: dict, result: str, max_output_lines: int = 8) -> None:
+    """Render a tool invocation + its result in Claude-Code style:
+
+      ● Bash(python3 --version)
+        ⎿  Python 3.14.5
+           /opt/homebrew/bin/python3
+
+    Output is indented under a `⎿` continuation, truncated cleanly when long.
+    """
+    header = _format_tool_call_header(name, args)
+    sys.stdout.write(f"  {C.BRAND}●{C.RESET} {C.BOLD}{header}{C.RESET}\n")
+    if not result:
+        sys.stdout.write(f"     {C.GRAY}⎿  (no output){C.RESET}\n"); sys.stdout.flush(); return
+    out = result.rstrip()
+    lines = out.split("\n")
+    shown = lines[:max_output_lines]
+    extra = len(lines) - len(shown)
+    for i, ln in enumerate(shown):
+        prefix = f"     {C.GRAY}⎿  " if i == 0 else f"        "
+        sys.stdout.write(f"{prefix}{C.GRAY}{shorten(ln, 160)}{C.RESET}\n")
+    if extra > 0:
+        sys.stdout.write(f"        {C.GRAY}… +{extra} líneas más{C.RESET}\n")
+    sys.stdout.flush()
 _SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
 
@@ -1383,7 +1447,9 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                     # Client-side tool execution
                     if name in TOOL_FNS:
                         await spinner.stop()
-                        cprint(f"  → {name}({shorten(json.dumps(args, ensure_ascii=False), 80)})", C.BRAND)
+                        # Claude-Code-style header: '● Bash(python3 --version)'
+                        header = _format_tool_call_header(name, args)
+                        sys.stdout.write(f"\n  {C.BRAND}●{C.RESET} {C.BOLD}{header}{C.RESET}\n"); sys.stdout.flush()
                         decision = request_permission(cfg, name, args)
                         if decision == "stop":
                             raise StopAgent()
@@ -1391,7 +1457,7 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                             tool_msg = {"role": "tool", "content": f"ERROR: usuario denegó {name}"}
                             if tc_id: tool_msg["tool_call_id"] = tc_id
                             messages.append(tool_msg)
-                            cprint("    ← denegado por el usuario", C.YELLOW)
+                            sys.stdout.write(f"     {C.YELLOW}⎿  denegado por el usuario{C.RESET}\n"); sys.stdout.flush()
                             continue
                         try:
                             result = await TOOL_FNS[name](**args)
@@ -1399,7 +1465,17 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                             result = f"ERROR: bad args for {name}: {e}"
                         except Exception as e:
                             result = f"ERROR: {type(e).__name__}: {e}"
-                        cprint(f"    ← {shorten(result.replace(chr(10), ' ⏎ '), 140)}", C.GRAY)
+                        # Render result block (indented under ⎿ with line cap).
+                        out = (result or "").rstrip()
+                        lines = out.split("\n") if out else ["(no output)"]
+                        shown = lines[:8]
+                        extra = len(lines) - len(shown)
+                        for i, ln in enumerate(shown):
+                            prefix = f"     {C.GRAY}⎿  " if i == 0 else f"        "
+                            sys.stdout.write(f"{prefix}{C.GRAY}{shorten(ln, 160)}{C.RESET}\n")
+                        if extra > 0:
+                            sys.stdout.write(f"        {C.GRAY}… +{extra} líneas más{C.RESET}\n")
+                        sys.stdout.flush()
                         tool_msg = {"role": "tool", "content": result[:8000]}
                         if tc_id: tool_msg["tool_call_id"] = tc_id
                         messages.append(tool_msg)
