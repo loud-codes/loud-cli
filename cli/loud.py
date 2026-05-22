@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.1.6"
+__version__ = "1.1.7"
 
 # ───────────────────── Config ─────────────────────
 
@@ -55,7 +55,7 @@ PERMS_FILE = LOUD_DIR / "permissions.json"
 DEFAULT_CONFIG = {
     "api_url": "https://api.loud.codes",
     "model": "loud-go",
-    "max_iterations": 25,    # bumped from 10 — multi-step plans need room to breathe
+    "max_iterations": 50,    # multi-step plans + self-recovery on errors need room
     "permission_mode": "ask",      # ask | yolo | safe (safe = block destructive ops)
     "typewriter": True,
     # Compute mode for chat inference:
@@ -1196,17 +1196,34 @@ Si el pedido tiene ≥3 acciones (instalar X, arrancar Y, exponer Z):
 
 NUNCA intentes "hacer todo de un solo embriónazo". Pasitos chicos, observación entre cada uno. Esa es la diferencia entre un asistente real y un script roto que se cae al primer error.
 
-## 4d. NO TE DETENGAS HASTA TERMINAR LA TAREA
-Crítico. Una vez que arrancaste un plan, tu obligación es completarlo. Cada turno tuyo es uno de estos:
-- Tool call que avanza al siguiente paso del plan, O
-- Mensaje final breve ("listo, X creado, Y arriba en URL Z, verificación pasó").
+## 4d. AUTONOMÍA TOTAL — luchá hasta resolver, jamás dejes una tarea a medias
+Esta es la regla más estricta. Una vez que arrancaste un plan, tu obligación es COMPLETARLO. Pase lo que pase con las tools.
 
-NO existe el "ya te dejo aquí para que sigas vos" en medio de una tarea técnica. Si llegaste a 80% no le digas al usuario "ahora podés correr el último paso" — corré vos el último paso. Si una tool falla, NO termines con "intentá tú"; ajustás y reintentás con corrección. La única forma legítima de terminar antes del goal es:
-- El usuario corrige a media tarea (entonces seguís lo nuevo).
-- Un permiso fue denegado y no hay alternativa.
-- El error es estructural (paquete no existe en este OS, etc.) — entonces decilo claro y proponé alternativa.
+Si una tool devuelve error:
+- LEÉ el mensaje completo. Errores comunes y sus salidas:
+  • `command not found` → instalalo con brew/apt/pip antes de seguir.
+  • `permission denied` → ¿estás en un path del sistema? Cambiá a un path del usuario (`/tmp/`, `~/`) o pedí permiso explícito.
+  • `port already in use` → matá el proceso que lo ocupa con `lsof -ti:<port> | xargs kill` y reintentá.
+  • `file not found` → `ls` el padre para entender qué hay; ajustá el path.
+  • `module not found` → instalá la dependencia o probá otro intérprete.
+  • Timeout → el proceso era de larga duración; usá `bash_background`.
+  • El CLI rechazó tu comando → leé el mensaje del CLI, parte el comando, usá otra tool. NO repitas idéntico.
+- Después de leer el error, EMITÍ otra tool call. Una distinta. Que ataque la causa concreta.
+- Si después de 3 intentos en el mismo paso no avanzás, RE-PLANEÁ: ¿hay otra ruta para llegar al goal?
+- Si después de 6 intentos seguís bloqueado, recién ahí decile al usuario qué obstáculo encontrás y qué alternativa proponés.
 
-Si una iteración devuelve solo prosa sin tool call, eso es un BUG tuyo — el agente loop te va a re-llamar; usa ese turno para hacer la siguiente tool concreta.
+Reglas duras:
+- NUNCA terminés con "podés probar X tú" en medio de una tarea técnica. Probalo VOS primero.
+- NUNCA emitas solo prosa sin tool call mientras el goal no esté. Si llegás a ese turno por accidente, el siguiente turno DEBÉ ser una tool concreta.
+- NUNCA pidás "más información" si lo podés averiguar con una tool (`ls`, `read_file`, `grep`, `bash`).
+- NUNCA repitás exactamente el mismo comando que falló — eso ES el bug.
+
+Las ÚNICAS formas legítimas de cerrar antes del goal:
+1. El usuario corrige a media tarea → seguís lo nuevo.
+2. El usuario explícitamente cancela.
+3. Estructural: el comando requiere root en una máquina sin sudo, paquete no existe en este OS, etc. Decilo claro y proponé alternativa concreta.
+
+Tu mantra: "esto va a funcionar, sólo no he encontrado el camino correcto todavía."
 
 ## 4e. TAREAS LARGAS — corré en background y mantené el hilo
 Para cualquier cosa que tarde más de ~10 segundos en producir resultado (servidores HTTP, ngrok, builds, watchers, downloaders, ML training, syncs grandes): NO uses `bash` con `&` — eso cuelga el CLI. Usá `bash_background(cmd, label)` que:
@@ -2198,11 +2215,31 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
         # synthesize a response using the tool outputs we just appended.
         if had_tool_call:
             continue
-        # No text and no tool calls — bail.
-        cprint("  · (sin respuesta)", C.YELLOW)
+        # No text and no tool calls — try ONE more time with an explicit nudge
+        # instead of bailing. Small models sometimes emit empty turns; a
+        # system reminder usually unsticks them.
+        nudges_used = sum(1 for m in messages if m.get("role") == "system" and m.get("_nudge"))
+        if nudges_used < 2:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Acabás de emitir un turno vacío. No paraste la tarea: el goal sigue abierto. "
+                    "En este próximo turno emití UNA tool call concreta que avance hacia el goal, "
+                    "o si genuinamente terminaste, escribí UNA frase de cierre. No quedarte callado."
+                ),
+                "_nudge": True,
+            })
+            cprint("  · loud nudge → reintentando", C.GRAY)
+            continue
+        # Two nudges in and still nothing — give up gracefully.
+        cprint("  · (turno vacío persistente)", C.YELLOW)
         return ""
 
-    cprint("  · max_iterations alcanzado", C.YELLOW)
+    # Hit the iteration cap. The new rule is to keep trying, so emit one
+    # last reset-and-recover prompt and let the OUTER loop (if user retries)
+    # pick it up.
+    cprint("  · llegué al techo de iteraciones — el goal no se cerró del todo.", C.YELLOW)
+    cprint("    Volvé a pedírmelo o decime qué falta y sigo desde ahí.", C.GRAY)
     return ""
 
 
