@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.8.3"
+__version__ = "0.8.4"
 
 # ───────────────────── Config ─────────────────────
 
@@ -1840,7 +1840,8 @@ SLASH_HELP = """\
                     · local = ollama en TU máquina (cero latencia, sin RAG)
                     · auto  = local si está arriba, sino cloud
 /setup local        instala Ollama + descarga el modelo local
-/save FILE          exporta la conversación a un archivo .md
+/save FILE          exporta la conversación actual a un archivo .md
+/open FILE          importa una conversación previa (.md o .json) al chat actual
 /cwd                imprime el directorio actual
 /login              inicia sesión (abre browser device-flow)
 /logout             cierra sesión actual
@@ -1855,17 +1856,18 @@ async def repl(cfg: dict) -> None:
     import uuid as _uuid
     sys_prompt = STATIC_SYSTEM_PROMPT
     messages = [{"role": "system", "content": sys_prompt}]
-    # Fresh chat_id per REPL launch — guarantees server-side isolation from any
-    # other chat. /reset rotates it; one-shot uses its own.
+    # Each `loud` launch is a FRESH chat. Nothing is loaded from disk and
+    # nothing is auto-saved when the REPL exits. The user explicitly invokes
+    # /save <file> to export, and /open <file> to import a prior conversation.
+    # This matches the privacy model: terminal chats are ephemeral by default.
     cfg["_chat_id"] = f"repl-{_uuid.uuid4().hex[:12]}"
-    history = load_session()
-    if history:
-        messages.extend(history)
+    # Wipe any stale session file from a pre-0.8.4 install.
+    if SESSION_FILE.exists():
+        try: SESSION_FILE.unlink()
+        except Exception: pass
 
     sys.stdout.write(render_banner(cfg))
     sys.stdout.flush()
-    if history:
-        cprint(f"  · {len(history) // 2} intercambios anteriores cargados\n", C.GRAY)
 
     while True:
         try:
@@ -1977,6 +1979,24 @@ async def repl(cfg: dict) -> None:
                 target = Path(arg or f"loud-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md").expanduser()
                 target.write_text(format_conversation(messages))
                 cprint(f"  · guardado en {target}", C.YELLOW)
+            elif cmd == "/open":
+                if not arg.strip():
+                    cprint(f"  · uso: /open <archivo.md o .json>", C.YELLOW)
+                    continue
+                target = Path(arg.strip()).expanduser()
+                if not target.exists():
+                    cprint(f"  · no existe: {target}", C.RED); continue
+                try:
+                    imported = parse_conversation_file(target)
+                    if not imported:
+                        cprint(f"  · archivo vacío o no parseable: {target}", C.YELLOW); continue
+                    # Append to the current in-memory session WITHOUT touching
+                    # the system prompt at the front.
+                    messages = [m for m in messages if m.get("role") == "system"] + imported
+                    cfg["_chat_id"] = f"repl-{_uuid.uuid4().hex[:12]}"
+                    cprint(f"  ✓ importados {len(imported)} mensajes desde {target.name}", C.GREEN)
+                except Exception as e:
+                    cprint(f"  · error abriendo {target}: {e}", C.RED)
             else:
                 cprint(f"  · comando desconocido: {cmd}", C.RED)
             continue
@@ -1995,7 +2015,49 @@ async def repl(cfg: dict) -> None:
 
         await run_turn(cfg, messages, user_text)
         cprint("", "")
-        save_session([m for m in messages if m.get("role") != "system"])
+        # No auto-save. The REPL conversation lives only in memory for this
+        # session. Use /save <file> to export, /open <file> to import.
+
+
+def parse_conversation_file(path: Path) -> list[dict]:
+    """Read a saved conversation. Accepts:
+    - `.json`: list of {role, content} produced by an earlier /save or backup
+    - `.md`  : markdown produced by format_conversation (## user / ## assistant
+      headings). System messages are skipped — only user/assistant pairs come
+      back in so the current chat's system prompt stays intact."""
+    text = path.read_text()
+    out: list[dict] = []
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict) and "messages" in data: data = data["messages"]
+            for m in data:
+                role = m.get("role")
+                if role in ("user", "assistant"):
+                    out.append({"role": role, "content": m.get("content", "")})
+        except Exception:
+            return []
+        return out
+    # Markdown: parse blocks separated by `## user` / `## assistant` (or USER /
+    # ASSISTANT case-insensitive). Everything after `## system` is ignored.
+    current_role = None
+    buf: list[str] = []
+    def _flush():
+        if current_role and buf:
+            content = "\n".join(buf).strip()
+            if content: out.append({"role": current_role, "content": content})
+    for ln in text.splitlines():
+        m = re.match(r"^##\s+(user|assistant|system|tool)\b", ln.strip(), re.IGNORECASE)
+        if m:
+            _flush()
+            buf = []
+            role = m.group(1).lower()
+            current_role = role if role in ("user", "assistant") else None
+            continue
+        if current_role:
+            buf.append(ln)
+    _flush()
+    return out
 
 
 def format_conversation(messages: list[dict]) -> str:
