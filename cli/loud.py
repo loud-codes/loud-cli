@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 
 # ───────────────────── Config ─────────────────────
 
@@ -276,20 +276,83 @@ def _save_perms(perms: dict) -> None:
     PERMS_FILE.write_text(json.dumps(perms, indent=2))
 
 
-def _perm_key(tool: str, args: dict) -> str:
-    """A stable key for caching always-allow decisions. For bash/ssh we
-    cache by the FIRST WORD of the command. For file ops, by the directory."""
+def _bash_first_word(cmd: str) -> str:
+    """First non-shell-noise word of a bash command, used for scoped allow."""
+    cmd = (cmd or "").strip()
+    # Skip leading env-var assignments like 'FOO=1 bar …'
+    parts = cmd.split()
+    while parts and "=" in parts[0] and " " not in parts[0]:
+        parts.pop(0)
+    return parts[0].split("/")[-1] if parts else ""
+
+
+def _path_parent(args_path: str) -> Path | None:
+    if not args_path: return None
+    try: return Path(args_path).expanduser().resolve().parent
+    except Exception: return None
+
+
+def _perm_key(tool: str, args: dict, scope: str | None = None) -> str:
+    """Stable key for caching always-allow decisions. The `scope` controls
+    granularity. Supported scopes:
+        bash      → 'exact'    = the exact command
+                    'verb'     = match any `<first-word> …` (eg. always allow git)
+                    'cwd'      = match any bash launched while cwd == current cwd
+        ssh       → 'host'     (always)
+        file ops  → 'file'     = this exact path
+                    'folder'   = anything inside the parent dir
+                    'recursive'= anything under that dir tree
+    """
     if tool == "bash":
-        return f"bash:{(args.get('cmd') or '').strip().split(' ')[0]}"
+        scope = scope or "verb"
+        if scope == "verb":
+            return f"bash:verb:{_bash_first_word(args.get('cmd',''))}"
+        if scope == "cwd":
+            return f"bash:cwd:{Path.cwd().resolve()}"
+        # exact
+        return f"bash:exact:{(args.get('cmd') or '').strip()}"
     if tool == "ssh":
         return f"ssh:{args.get('host', '?')}"
     if tool in ("write_file", "edit_file", "read_file"):
-        p = Path(args.get("path", "")).expanduser()
-        try:
-            return f"{tool}:{p.parent.resolve()}"
-        except Exception:
-            return f"{tool}:?"
+        scope = scope or "folder"
+        parent = _path_parent(args.get("path", ""))
+        if not parent: return f"{tool}:?"
+        if scope == "file":
+            try: return f"{tool}:file:{Path(args['path']).expanduser().resolve()}"
+            except Exception: return f"{tool}:?"
+        if scope == "recursive":
+            return f"{tool}:tree:{parent}"
+        # folder = same parent dir, not recursive
+        return f"{tool}:folder:{parent}"
     return tool
+
+
+def _perm_match(perms: dict, tool: str, args: dict) -> str | None:
+    """Check whether `perms` has a saved 'always' rule that matches this call.
+    Tries all granularities (most specific first) so a 'recursive' rule on a
+    parent still applies to children, a 'verb' rule applies to any bash with
+    that first word, etc. Returns the matched scope label or None."""
+    if tool == "bash":
+        for scope in ("exact", "verb", "cwd"):
+            if perms.get(_perm_key(tool, args, scope)) == "always":
+                return scope
+        return None
+    if tool == "ssh":
+        return "host" if perms.get(_perm_key(tool, args)) == "always" else None
+    if tool in ("write_file", "edit_file", "read_file"):
+        # most specific first
+        if perms.get(_perm_key(tool, args, "file")) == "always": return "file"
+        if perms.get(_perm_key(tool, args, "folder")) == "always": return "folder"
+        # 'recursive' applies if any ancestor dir has it
+        p = _path_parent(args.get("path", ""))
+        if p:
+            cur = p
+            while True:
+                if perms.get(f"{tool}:tree:{cur}") == "always": return "recursive"
+                if cur == cur.parent: break
+                cur = cur.parent
+        return None
+    return None
 
 
 def is_destructive(tool: str, args: dict) -> bool:
@@ -303,8 +366,8 @@ def is_destructive(tool: str, args: dict) -> bool:
 
 def request_permission(cfg: dict, tool: str, args: dict) -> str:
     """Returns 'allow', 'deny', or 'stop'. Mutates `args` in-place when the
-    user picks 'edit' — they get to rewrite the cmd / path / content before
-    the tool fires."""
+    user picks 'edit'. When the user picks 'always', a sub-selector lets them
+    pick the SCOPE of the always-rule (exact / verb / folder / recursive)."""
     mode = cfg.get("permission_mode", "ask")
     if mode == "yolo":
         return "allow"
@@ -313,33 +376,83 @@ def request_permission(cfg: dict, tool: str, args: dict) -> str:
     if tool not in DESTRUCTIVE_TOOLS:
         return "allow"
     perms = _load_perms()
-    key = _perm_key(tool, args)
-    if perms.get(key) == "always":
+    matched_scope = _perm_match(perms, tool, args)
+    if matched_scope:
         return "allow"
 
+    # ── Header with rich context about what's about to happen ──
     cprint("", "")
     cprint(f"  ┌─ permiso requerido ─ {tool}", C.YELLOW, bold=True)
     if tool == "bash":
-        cprint(f"  │  $ {shorten(args.get('cmd', ''), 200)}", C.GRAY)
+        cprint(f"  │  cwd: {Path.cwd()}", C.GRAY)
+        cprint(f"  │  $ {shorten(args.get('cmd', ''), 220)}", C.GRAY)
+        if is_destructive(tool, args):
+            cprint(f"  │  ⚠ marcado como destructivo", C.RED)
     elif tool == "ssh":
-        cprint(f"  │  ssh {args.get('host')} \"{shorten(args.get('cmd', ''), 160)}\"", C.GRAY)
+        cprint(f"  │  host: {args.get('host')}", C.GRAY)
+        cprint(f"  │  $ {shorten(args.get('cmd', ''), 200)}", C.GRAY)
     elif tool == "write_file":
-        cprint(f"  │  → {args.get('path')}  ({len(args.get('content', ''))} bytes)", C.GRAY)
+        content = args.get("content", "")
+        size_kb = len(content.encode("utf-8")) / 1024
+        lines = content.count("\n") + 1
+        cprint(f"  │  → {args.get('path')}", C.GRAY)
+        cprint(f"  │  {size_kb:.1f} KB · {lines} líneas · {'sobrescribe' if Path(args.get('path','')).expanduser().exists() else 'crea nuevo'}", C.GRAY)
+        for ln in content.splitlines()[:3]:
+            cprint(f"  │    {shorten(ln, 200)}", C.DIM)
+        if lines > 3:
+            cprint(f"  │    … +{lines-3} líneas más", C.DIM)
     elif tool == "edit_file":
         cprint(f"  │  ✎ {args.get('path')}", C.GRAY)
+        old = (args.get("old") or "").strip()
+        new = (args.get("new") or "").strip()
+        cprint(f"  │  - {shorten(old, 200)}", C.RED)
+        cprint(f"  │  + {shorten(new, 200)}", C.GREEN)
     cprint(f"  └─ usa ↑/↓ y Enter (o presiona la letra)", C.YELLOW)
     ans = select_option("", [
         ("y", "Sí, correr esto"),
         ("n", "No, cancelar"),
         ("e", "Editar antes de correr"),
-        ("a", "Siempre permitir esto"),
+        ("a", "Siempre permitir… (elegir alcance)"),
         ("s", "Detener al agente"),
     ], default=0)
     if ans == "esc":
         return "stop"
     if ans == "a":
-        perms[key] = "always"
-        _save_perms(perms)
+        # Sub-selector for the scope of the "always" rule.
+        if tool == "bash":
+            verb = _bash_first_word(args.get("cmd",""))
+            cwd  = Path.cwd()
+            scope_choice = select_option(
+                "  ¿Hasta dónde aplica el 'siempre permitir'?",
+                [
+                    ("v", f"Cualquier `{verb} …` en cualquier folder"),
+                    ("c", f"Cualquier bash mientras esté en {cwd}"),
+                    ("x", f"SOLO este comando exacto"),
+                    ("n", "Cancelar (esta vez no)"),
+                ], default=0)
+            if scope_choice in ("esc", "n"): return "deny"
+            scope = {"v":"verb","c":"cwd","x":"exact"}.get(scope_choice, "verb")
+            perms[_perm_key(tool, args, scope)] = "always"
+            _save_perms(perms)
+            cprint(f"  ✓ guardado: {_perm_key(tool, args, scope)}", C.GREEN)
+        elif tool in ("write_file", "edit_file", "read_file"):
+            parent = _path_parent(args.get("path",""))
+            scope_choice = select_option(
+                "  ¿Hasta dónde aplica el 'siempre permitir'?",
+                [
+                    ("d", f"Cualquier archivo dentro de {parent}"),
+                    ("r", f"Cualquier archivo bajo {parent} (recursivo)"),
+                    ("f", f"SOLO este archivo"),
+                    ("n", "Cancelar"),
+                ], default=0)
+            if scope_choice in ("esc", "n"): return "deny"
+            scope = {"d":"folder","r":"recursive","f":"file"}.get(scope_choice, "folder")
+            perms[_perm_key(tool, args, scope)] = "always"
+            _save_perms(perms)
+            cprint(f"  ✓ guardado: {_perm_key(tool, args, scope)}", C.GREEN)
+        else:
+            perms[_perm_key(tool, args)] = "always"
+            _save_perms(perms)
         return "allow"
     if ans == "y":
         return "allow"
@@ -1787,10 +1900,32 @@ async def repl(cfg: dict) -> None:
                     f = t["function"]
                     cprint(f"  · {f['name']:12s} {f['description']}", C.BRAND)
             elif cmd == "/permissions":
-                if arg in ("ask", "yolo", "safe"):
-                    cfg["permission_mode"] = arg
+                sub = arg.strip().split()
+                action = sub[0] if sub else ""
+                if action in ("ask", "yolo", "safe"):
+                    cfg["permission_mode"] = action
                     save_config(cfg)
-                cprint(f"  · permisos: {cfg.get('permission_mode')}  (ask/yolo/safe)", C.YELLOW)
+                    cprint(f"  · permisos: {cfg.get('permission_mode')}", C.YELLOW)
+                elif action == "list":
+                    perms = _load_perms()
+                    if not perms:
+                        cprint("  · sin reglas always-allow guardadas", C.GRAY)
+                    else:
+                        cprint(f"  · {len(perms)} reglas always-allow:", C.YELLOW, bold=True)
+                        for k in sorted(perms):
+                            cprint(f"    · {k}", C.GRAY)
+                elif action == "clear":
+                    PERMS_FILE.unlink(missing_ok=True)
+                    cprint("  ✓ todas las always-allow borradas", C.GREEN)
+                elif action == "revoke" and len(sub) > 1:
+                    target = " ".join(sub[1:])
+                    perms = _load_perms()
+                    n = sum(1 for k in list(perms) if target in k and perms.pop(k, None))
+                    _save_perms(perms)
+                    cprint(f"  ✓ revocadas {n} reglas que contienen '{target}'", C.GREEN)
+                else:
+                    cprint(f"  · permisos: {cfg.get('permission_mode')}", C.YELLOW)
+                    cprint(f"  · /permissions ask|yolo|safe  ·  list  ·  clear  ·  revoke <patrón>", C.GRAY)
             elif cmd == "/mode":
                 if arg in ("cloud", "local", "auto"):
                     cfg["mode"] = arg
@@ -1888,6 +2023,18 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.api_url:
         cfg["api_url"] = args.api_url
         save_config(cfg)
+    if getattr(args, "local", False):
+        cfg["mode"] = "local"
+    if getattr(args, "cloud", False):
+        cfg["mode"] = "cloud"
+    if getattr(args, "auto", False):
+        cfg["mode"] = "auto"
+    if getattr(args, "yolo", False):
+        # --dangerously-skip-permissions / --yolo: ephemeral for this run only.
+        # We do NOT persist this into config.json — pasar el flag explícito
+        # cada vez que querés saltar permisos es parte del freno de mano.
+        cfg["permission_mode"] = "yolo"
+        cprint("  ⚠ --dangerously-skip-permissions ACTIVO · sin prompts de [y/n]", C.RED, bold=True)
 
     # Claude-Code-style flow: NO forced login at startup. The REPL starts
     # whether you're logged in or not — the banner shows the auth state and
@@ -1966,6 +2113,9 @@ def main() -> int:
     parser.add_argument("--local",  action="store_true", help="Forzar modo local (Ollama 127.0.0.1)")
     parser.add_argument("--cloud",  action="store_true", help="Forzar modo cloud (api.loud.codes)")
     parser.add_argument("--auto",   action="store_true", help="Modo híbrido: local si está arriba, sino cloud")
+    parser.add_argument("--dangerously-skip-permissions", "--yolo", action="store_true",
+                        dest="yolo",
+                        help="Salta TODOS los prompts de permiso (sin pedir [y/n] para nada). Igual de peligroso que suena.")
     parser.add_argument("--version", action="version", version=f"loud {__version__}")
     args = parser.parse_args()
     try:
