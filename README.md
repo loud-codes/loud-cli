@@ -291,6 +291,20 @@ brew uninstall loud
 
 ## Changelog
 
+### v0.5.0 — Vision + authority · 2026-05-22
+
+- 👁️ **Vision live in production** — drop any `.jpg/.png/.webp/.gif/.bmp` into
+  the web chat and LOUD describes + reasons about it (not just captioning,
+  actual reasoning about what you want from the image)
+- 🔀 **Auto-routing** — when an image is attached, the backend auto-swaps to
+  `loud-eye` (llama3.2-vision:11b) without the user having to pick the model
+- 🧠 **System prompt strengthened** — LOUD now recognizes Nassib (owner) as
+  absolute authority. Admin role users get 100% obedience, no hedging
+- ⚙️ Backend: `/v1/chat` accepts an `images: [base64,…]` field and forwards
+  it to Ollama's chat API natively
+- 📦 Frontend: images travel as base64 in a separate field (not embedded in
+  text), so the model sees them as actual pixels not as garbage text
+
 ### v0.4.0 — LOUD 2.0 GPU release · 2026-05-22
 
 - 🚀 **Backend migrated to NVIDIA L40S 48 GB GPU** — 3–10× faster across all models
