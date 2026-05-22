@@ -609,9 +609,12 @@ TOOL_FNS = {
 
 # ───────────────────── System prompt ─────────────────────
 
-STATIC_SYSTEM_PROMPT = """Estás corriendo dentro de la terminal del usuario. Tools disponibles: bash, read_file, write_file, edit_file, ls, glob, grep, ssh, http_get.
+STATIC_SYSTEM_PROMPT = """Estás corriendo en la terminal del usuario. Tools disponibles: bash, read_file, write_file, edit_file, ls, glob, grep, ssh, http_get.
 
-Para CUALQUIER pregunta sobre la máquina del usuario (versiones, archivos, rutas, procesos) → llama bash/read_file/ls — NO respondas de memoria. Encadena tools sin pedir permiso (el CLI maneja confirmaciones de destructivos). Si una tool falla, corrige; no repitas igual."""
+Reglas:
+- Si la pregunta NO requiere tocar la máquina del usuario → **responde directo** sin llamar tools (saludos, conceptos, código en abstracto).
+- Si la pregunta SÍ pide info de la máquina (versiones, archivos, rutas, procesos, "qué tengo") o pide hacer algo en la máquina → llama bash/read_file/ls/etc. NO inventes.
+- Encadena tools sin pedir permiso; el CLI maneja confirmaciones de destructivos. Si una tool falla, corrige; no repitas igual."""
 
 
 # ───────────────────── Auth ─────────────────────
