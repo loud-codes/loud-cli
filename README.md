@@ -291,6 +291,21 @@ brew uninstall loud
 
 ## Changelog
 
+### v0.7.0 — Claude-Code-style REPL · 2026-05-22
+
+- 🎯 **No more forced login at startup** — type `loud` and you enter the REPL
+  immediately. The welcome banner shows your status ("● signed in" or
+  "● not signed in — type /login"). Login is just a slash command.
+- 🪪 **Auth gate only when sending a chat** — same UX as `claude`: you can
+  look around, run `/help`, `/version`, etc. without authenticating. The
+  moment you try to send a prompt is the moment we ask you to `/login`.
+- 🔗 **Banner now shows GitHub links + update commands inline** — web, docs,
+  issues, and `brew upgrade loud` / `loud update` shortcuts.
+- ➕ **New slash commands** in the REPL: `/login`, `/logout`, `/whoami`,
+  `/version` (in addition to existing ones).
+- 🧹 Removed the first-run setup wizard — modern flow is "enter and explore",
+  not "fill in a form before you can use the tool".
+
 ### v0.6.0 — Browser-based device login · 2026-05-22
 
 - 🔐 **`loud login` ya no pide contraseña en la terminal** — usa device flow OAuth-style.

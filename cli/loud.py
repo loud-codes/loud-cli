@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -944,21 +944,24 @@ def reset_session() -> None:
 # ───────────────────── REPL ─────────────────────
 
 def render_banner(cfg: dict) -> str:
-    """Claude-Code-style welcome box with LOUD branding."""
+    """Claude-Code-style welcome box with LOUD branding.
+
+    Always shown when entering the REPL. Reflects whether the user is logged
+    in or not — login is a `/login` slash command, never blocks startup."""
     user = load_auth().get("user", {})
+    is_logged = bool(get_token() and user)
     who = user.get("username") or user.get("email") or "no login"
     role = user.get("role", "")
     cwd = str(Path.cwd())
     if len(cwd) > 48:
         cwd = "…" + cwd[-47:]
-    # The visible width inside the box
-    W = 60
+    W = 62
     G = C.BRAND
     R = C.RESET
     D = C.DIM
     B = C.BOLD
+    Y = C.YELLOW
 
-    # ASCII logo lines, padded to width
     logo_lines = [
         "██╗      ██████╗ ██╗   ██╗██████╗ ",
         "██║     ██╔═══██╗██║   ██║██╔══██╗",
@@ -968,8 +971,7 @@ def render_banner(cfg: dict) -> str:
         "╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝ ",
     ]
 
-    def row(content: str, pad_color: str = "") -> str:
-        # `content` includes ANSI; visible length must be measured separately
+    def row(content: str) -> str:
         visible = re.sub(r"\033\[[0-9;]*m", "", content)
         gap = max(0, W - len(visible))
         return f"{G}│{R} {content}{' ' * gap} {G}│{R}\n"
@@ -977,22 +979,39 @@ def render_banner(cfg: dict) -> str:
     top    = f"{G}╭{'─' * (W + 2)}╮{R}\n"
     bot    = f"{G}╰{'─' * (W + 2)}╯{R}\n"
     blank  = row("")
+    sep    = f"{G}├{'─' * (W + 2)}┤{R}\n"
 
     out = [top, blank]
     for line in logo_lines:
         out.append(row(f"{B}{G}  {line}{R}"))
     out.append(blank)
-    out.append(row(f"{B}✻ Welcome to LOUD{R} {D}— terminal-first AI{R}"))
+    out.append(row(f"{B}✻ Welcome to LOUD{R} {D}— terminal-first AI · v{__version__}{R}"))
     out.append(blank)
-    out.append(row(f"{D}sesión:{R}  {G}{who}{R}{D}{' · ' + role if role else ''}{R}"))
-    out.append(row(f"{D}modelo:{R}  {G}{cfg['model']}{R}   {D}permisos:{R}  {G}{cfg.get('permission_mode', 'ask')}{R}"))
+
+    # ── Status block ──
+    if is_logged:
+        out.append(row(f"{D}status:{R}  {G}● signed in{R} as {G}{who}{R}{D}{' · ' + role if role else ''}{R}"))
+    else:
+        out.append(row(f"{D}status:{R}  {Y}● not signed in{R}  {D}— type {R}{B}{G}/login{R}{D} to start{R}"))
+    out.append(row(f"{D}model:{R}   {G}{cfg['model']}{R}    {D}perms:{R}  {G}{cfg.get('permission_mode', 'ask')}{R}"))
     out.append(row(f"{D}cwd:{R}     {cwd}"))
     out.append(row(f"{D}server:{R}  {cfg['api_url']}"))
     out.append(blank)
-    out.append(row(f"{D}/help para comandos · Esc detiene el agente · Ctrl+C sale{R}"))
+    out.append(sep)
+    out.append(blank)
+
+    # ── Useful links block ──
+    out.append(row(f"{D}links{R}"))
+    out.append(row(f"  {G}web{R}      https://loud.codes"))
+    out.append(row(f"  {G}docs{R}     https://github.com/loud-codes/loud-cli#readme"))
+    out.append(row(f"  {G}issues{R}   https://github.com/loud-codes/loud-cli/issues"))
+    out.append(row(f"  {G}update{R}   {D}brew upgrade loud{R}  ·  {D}loud update{R}"))
+    out.append(blank)
+    out.append(row(f"{D}type {R}{B}{G}/help{R}{D} for commands · {R}{B}Esc{R}{D} stops the agent · {R}{B}Ctrl+C{R}{D} exits{R}"))
     latest = _cached_latest_version()
     if latest and latest != __version__:
-        out.append(row(f"{C.YELLOW}↑ nueva versión disponible: {latest}{R} {D}— corre `loud update`{R}"))
+        out.append(blank)
+        out.append(row(f"{Y}↑ new version available: {latest}{R} {D}— run `loud update`{R}"))
     out.append(blank)
     out.append(bot)
     return "".join(out)
@@ -1011,7 +1030,11 @@ SLASH_HELP = """\
 /permissions        muestra/cambia el modo de permisos (ask/yolo/safe)
 /save FILE          exporta la conversación a un archivo .md
 /cwd                imprime el directorio actual
+/login              inicia sesión (abre browser device-flow)
+/logout             cierra sesión actual
+/whoami             muestra el usuario logueado
 /update             actualiza el CLI a la última versión (igual que `loud update`)
+/version            versión actual del CLI
 /exit               salir
 """
 
@@ -1066,6 +1089,16 @@ async def repl(cfg: dict) -> None:
                 cprint(f"  · permisos: {cfg.get('permission_mode')}  (ask/yolo/safe)", C.YELLOW)
             elif cmd == "/cwd":
                 cprint(f"  · {Path.cwd()}", C.YELLOW)
+            elif cmd == "/login":
+                ok = await cmd_login(cfg)
+                if ok:
+                    cprint("  · ya puedes empezar a chatear", C.GRAY)
+            elif cmd == "/logout":
+                await cmd_logout()
+            elif cmd == "/whoami":
+                await cmd_whoami(cfg)
+            elif cmd == "/version":
+                cprint(f"  · loud v{__version__}", C.BRAND)
             elif cmd == "/update":
                 await cmd_update(cfg)
             elif cmd == "/save":
@@ -1074,6 +1107,18 @@ async def repl(cfg: dict) -> None:
                 cprint(f"  · guardado en {target}", C.YELLOW)
             else:
                 cprint(f"  · comando desconocido: {cmd}", C.RED)
+            continue
+
+        # ── Auth gate: only checked here, not at startup ──
+        # We let the user enter the REPL, see the welcome, look around, etc.
+        # without forcing login. The check only kicks in when they actually
+        # want to chat (same UX as Claude Code).
+        if not get_token():
+            cprint("", "")
+            cprint("  ┌─ no estás logueado", C.YELLOW, bold=True)
+            cprint(f"  │  Escribe {C.BOLD}{C.BRAND}/login{C.RESET}{C.YELLOW} para entrar (abre tu navegador).", C.YELLOW)
+            cprint( "  │  Sin sesión no puedo procesar prompts.", C.YELLOW)
+            cprint( "  └─", C.YELLOW)
             continue
 
         await run_turn(cfg, messages, user_text)
@@ -1107,29 +1152,14 @@ async def main_async(args: argparse.Namespace) -> int:
         cfg["api_url"] = args.api_url
         save_config(cfg)
 
-    # Subcommands that intentionally work without auth
-    NOAUTH = {"login", "logout", "update", "version", "--help", "-h", "help"}
-
-    is_noauth = bool(args.question) and args.question[0] in NOAUTH
-
-    # First-run experience: walk through setup wizard if no config saved yet.
-    if not CONFIG_FILE.exists() and not is_noauth:
-        await setup_wizard(cfg)
-        cfg = load_config()  # reload in case wizard saved changes
-
-    # Login is REQUIRED for anything except the explicit no-auth subcommands.
-    # Loop until we have a valid token (or the user gives up with Ctrl+C).
-    if not is_noauth and not get_token():
-        cprint(f"\n  Sesión requerida — entra con tu cuenta de loud.codes.", C.BRAND, bold=True)
-        cprint(f"  (¿no tienes cuenta? Regístrate en https://loud.codes)\n", C.GRAY)
-        for attempt in range(3):
-            ok = await cmd_login(cfg)
-            if ok:
-                break
-            cprint(f"\n  · intento {attempt + 1}/3 falló — vuelve a intentar\n", C.YELLOW)
-        if not get_token():
-            cprint("\n  · sin sesión válida — saliendo. Corre 'loud login' cuando quieras.", C.RED)
-            return 1
+    # Claude-Code-style flow: NO forced login at startup. The REPL starts
+    # whether you're logged in or not — the banner shows the auth state and
+    # the user can `/login` when ready. We only require auth at the moment
+    # the user actually sends a chat message.
+    #
+    # Save config on first run so we don't re-create it every time.
+    if not CONFIG_FILE.exists():
+        save_config(cfg)
 
     # Subcommands
     if args.question and args.question[0] in ("login", "logout", "whoami", "update", "version"):
