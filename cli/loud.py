@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 
 # ───────────────────── Config ─────────────────────
 
@@ -291,7 +291,9 @@ SYSTEM_DESTRUCTIVE_PATTERNS = [
 # System-owned path prefixes for write/edit_file. Even in yolo we prompt.
 SYSTEM_PATH_PREFIXES = (
     "/etc/", "/System/", "/var/", "/opt/", "/usr/", "/bin/", "/sbin/",
-    "/private/var/", "/Applications/",
+    # macOS resolves /etc → /private/etc, /var → /private/var, /tmp → /private/tmp.
+    # We check both unresolved and resolved forms.
+    "/private/etc/", "/private/var/", "/Applications/",
 )
 
 # Long-running server patterns. If the model tries to run these via plain
@@ -328,13 +330,17 @@ def is_system_destructive(tool: str, args: dict) -> bool:
         cmd = (args.get("cmd") or "").strip()
         return any(re.search(p, cmd, re.IGNORECASE) for p in SYSTEM_DESTRUCTIVE_PATTERNS)
     if tool in ("write_file", "edit_file"):
-        path = (args.get("path") or "").strip()
+        raw = (args.get("path") or "").strip()
+        candidates = [raw]
         try:
-            resolved = str(Path(path).expanduser().resolve())
+            candidates.append(str(Path(raw).expanduser().resolve()))
         except Exception:
-            resolved = path
-        return any(resolved.startswith(p.rstrip("/") + "/") or resolved == p.rstrip("/")
-                   for p in SYSTEM_PATH_PREFIXES)
+            pass
+        for c in candidates:
+            for p in SYSTEM_PATH_PREFIXES:
+                if c.startswith(p) or c == p.rstrip("/"):
+                    return True
+        return False
     return False
 
 
