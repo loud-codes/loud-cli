@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.3.3"
+__version__ = "1.3.4"
 
 # ───────────────────── Config ─────────────────────
 
@@ -973,13 +973,97 @@ async def tool_screenshot(label: str | None = None) -> str:
 _BROWSER_STATE: dict = {"context": None, "page": None, "_loop_task": None}
 
 
+def _venv_python() -> str:
+    p = Path(__file__).resolve().parents[1] / "venv" / "bin" / "python"
+    return str(p) if p.exists() else "python3"
+
+
+def _venv_pip() -> str:
+    p = Path(__file__).resolve().parents[1] / "venv" / "bin" / "pip"
+    return str(p) if p.exists() else "pip3"
+
+
+async def _ensure_playwright_ready() -> bool:
+    """If playwright + chromium aren't installed, pop the L modal asking the
+    user to authorize the install, then run it inline and resume the original
+    tool call. Returns True when ready, False when user cancels or install
+    fails. This is what makes the agent feel like a real assistant: when a
+    dep is missing, fixed RIGHT THERE instead of dead-ending."""
+    try:
+        from playwright.async_api import async_playwright  # noqa: F401
+        # Also confirm chromium is downloaded
+        result = subprocess.run([_venv_python(), "-m", "playwright", "install", "--dry-run", "chromium"],
+                                capture_output=True, text=True, timeout=20)
+        # If chromium is missing, the dry-run output mentions it
+        if "Chromium" in (result.stdout + result.stderr) and "is already installed" not in (result.stdout + result.stderr):
+            raise FileNotFoundError("chromium browser binary missing")
+        return True
+    except (ImportError, FileNotFoundError):
+        pass
+    body = (
+        "LOUD necesita playwright + Chromium para controlar el navegador, "
+        "pero no están instalados en tu mac.\n\n"
+        "¿Lo instalo ahora? (~400 MB · 1-2 min)\n\n"
+        "Esto corre:\n"
+        "  pip install playwright\n"
+        "  playwright install chromium"
+    )
+    d = confirm_floating_l("Instalar playwright + Chromium", body)
+    if d != "allow":
+        return False
+    cprint("  ● Installing(playwright + chromium)", C.BRAND, bold=True)
+    try:
+        subprocess.run([_venv_pip(), "install", "--quiet", "playwright"],
+                       check=True, timeout=180)
+        cprint("     ⎿  ✓ playwright pip ok", C.GRAY)
+        subprocess.run([_venv_python(), "-m", "playwright", "install", "chromium"],
+                       check=True, timeout=600)
+        cprint("     ⎿  ✓ chromium binary ok", C.GRAY)
+        return True
+    except subprocess.CalledProcessError as e:
+        cprint(f"     ⎿  ✗ install falló: {e}", C.RED)
+        return False
+    except Exception as e:
+        cprint(f"     ⎿  ✗ {e}", C.RED)
+        return False
+
+
+async def _ensure_voice_deps() -> bool:
+    """Same idea but for sounddevice/numpy (voice STT)."""
+    try:
+        import sounddevice  # noqa: F401
+        import numpy        # noqa: F401
+        return True
+    except ImportError:
+        pass
+    body = (
+        "LOUD necesita sounddevice + numpy para capturar el micrófono, "
+        "pero no están instalados.\n\n"
+        "¿Los instalo ahora? (~30 MB · 30 s)"
+    )
+    d = confirm_floating_l("Instalar voz (sounddevice + numpy)", body)
+    if d != "allow":
+        return False
+    cprint("  ● Installing(voice deps)", C.BRAND, bold=True)
+    try:
+        subprocess.run([_venv_pip(), "install", "--quiet", "sounddevice", "numpy"],
+                       check=True, timeout=180)
+        return True
+    except Exception as e:
+        cprint(f"     ⎿  ✗ {e}", C.RED)
+        return False
+
+
 async def _browser_get_page():
     if _BROWSER_STATE.get("page") is not None:
         return _BROWSER_STATE["page"]
+    # AUTO-FIX: if playwright is missing, ask the user inline and install.
+    if not await _ensure_playwright_ready():
+        raise RuntimeError("playwright no disponible · el usuario canceló o el install falló.")
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        raise RuntimeError("playwright no instalado. Corré `loud setup gui` y reintentá.")
+        raise RuntimeError("playwright sigue sin importar después del install.")
     pw = await async_playwright().start()
     user_data = LOUD_DIR / "browser-data"
     user_data.mkdir(parents=True, exist_ok=True)
@@ -1112,15 +1196,17 @@ def tts_say(text: str) -> None:
 
 async def tool_voice_listen(max_seconds: int = 8) -> str:
     """Record from the mic for up to `max_seconds`, send to the LOUD backend
-    /v1/transcribe (Gemini audio), return the recognized text. Requires
-    `loud setup gui` (installs sounddevice + numpy)."""
+    /v1/transcribe (Gemini audio), return the recognized text. Auto-installs
+    sounddevice/numpy on first call via the floating L modal."""
+    if not await _ensure_voice_deps():
+        return "ERROR: el usuario canceló el install de deps de voz."
     try:
         import sounddevice as sd
         import numpy as np
         import wave
         import io
     except ImportError:
-        return "ERROR: sounddevice/numpy no instalados. Corré `loud setup gui` y reintentá."
+        return "ERROR: sounddevice/numpy todavía no importan después del install."
     cprint("  ● listening… (hablá ahora)", C.BRAND, bold=True)
     samplerate = 16000
     frames = int(samplerate * max(1, min(max_seconds, 60)))
