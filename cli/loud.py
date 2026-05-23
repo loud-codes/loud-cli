@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # ───────────────────── Config ─────────────────────
 
@@ -1158,6 +1158,38 @@ def tool_voice_say(text: str) -> str:
     """Speak `text` via local TTS (mac built-in `say`)."""
     tts_say(text)
     return f"✓ spoken · {len(text)} chars"
+
+
+async def _report_error_to_backend(cfg: dict, user_text: str, tool_name: str,
+                                   tool_args: dict, error_msg: str) -> dict | None:
+    """Fire the auto-heal pipeline: send the tool error to /v1/error-report,
+    get back a fix (from brain or Gemini). The backend also queues this fix
+    as a pending_chunk that admins approve from the dash — that's how the
+    brain grows from real user pain. Returns {fix, source, pending_id} or
+    None on network failure."""
+    token = get_token()
+    if not token:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            r = await client.post(
+                f"{cfg['api_url']}/v1/error-report",
+                json={
+                    "question":  (user_text or "")[:1800],
+                    "tool_name": tool_name,
+                    "tool_args": json.dumps(tool_args, ensure_ascii=False)[:3500],
+                    "error_msg": (error_msg or "")[:3500],
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if r.status_code != 200:
+                return None
+            d = r.json() or {}
+            if d.get("ok") and d.get("fix"):
+                return d
+    except Exception:
+        pass
+    return None
 
 
 async def tool_ask_oracle(question: str) -> str:
@@ -2704,6 +2736,30 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                         tool_msg = {"role": "tool", "content": result[:8000]}
                         if tc_id: tool_msg["tool_call_id"] = tc_id
                         messages.append(tool_msg)
+                        # Self-healing pipeline: if the tool errored, report it
+                        # to the backend which (a) searches the brain for a
+                        # known fix, (b) falls back to Gemini, (c) queues it
+                        # as a pending chunk for admin approval, (d) returns
+                        # the fix to us NOW so we inject it as context and
+                        # the model keeps moving instead of dead-ending.
+                        if isinstance(result, str) and result.lstrip().startswith("ERROR"):
+                            try:
+                                fix = await _report_error_to_backend(
+                                    cfg, user_text, name, args, result,
+                                )
+                                if fix:
+                                    sys.stdout.write(f"     {C.YELLOW}🩺 self-heal · {fix['source']}{C.RESET}\n")
+                                    sys.stdout.flush()
+                                    messages.append({
+                                        "role": "system",
+                                        "content": (
+                                            f"SELF-HEAL HINT (from LOUD {fix['source']}, pending admin approval). "
+                                            f"The last tool failed; here's how to fix it. Try this and continue:\n\n"
+                                            f"{fix['fix']}"
+                                        ),
+                                    })
+                            except Exception:
+                                pass  # don't break the flow if reporting fails
                         # Re-arm the spinner for the next model turn with the
                         # tool-specific label so the user sees what's happening.
                         spinner.start(_TOOL_LABEL.get(name, name.capitalize()))
