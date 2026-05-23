@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.3.4"
+__version__ = "1.3.5"
 
 # ───────────────────── Config ─────────────────────
 

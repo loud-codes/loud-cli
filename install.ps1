@@ -68,8 +68,24 @@ Step "Creating isolated Python env"
 Ok "venv ready"
 
 Step "Installing dependencies"
-& (Join-Path $Venv "Scripts\python.exe") -m pip install --quiet --upgrade pip httpx
-Ok "httpx installed"
+$VenvPython = Join-Path $Venv "Scripts\python.exe"
+& $VenvPython -m pip install --quiet --upgrade pip httpx
+Ok "httpx (core) installed"
+
+# Full GUI/voice/browser bundle by default — same idea as install.sh.
+if (-not $env:LOUD_SKIP_GUI) {
+  Step "Installing GUI / browser / voice bundle"
+  & $VenvPython -m pip install --quiet playwright sounddevice numpy pyautogui pillow mss
+  Ok "playwright + voice + GUI deps installed"
+
+  Step "Downloading Chromium for playwright (~400 MB)"
+  try {
+    & $VenvPython -m playwright install chromium
+    Ok "chromium ready"
+  } catch {
+    Write-Host "  warn: chromium install hit an error — run 'loud setup gui' later to retry"
+  }
+}
 
 # ───────────────────────── shim ─────────────────────────
 Step "Installing 'loud' command"
