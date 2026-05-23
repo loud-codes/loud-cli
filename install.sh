@@ -115,7 +115,24 @@ spin $! "creating venv at $INSTALL_DIR/venv"
 
 step "Installing dependencies"
 ( "$INSTALL_DIR/venv/bin/pip" install --quiet -U pip httpx ) &
-spin $! "pip install httpx"
+spin $! "pip install httpx (core)"
+
+# Full bundle by default — browser + voice + screen control are part of LOUD.
+# Set LOUD_SKIP_GUI=1 to opt out (faster install, no GUI tools).
+if [ -z "$LOUD_SKIP_GUI" ]; then
+  step "Installing GUI / browser / voice bundle (loud setup is in the install)"
+  (
+    "$INSTALL_DIR/venv/bin/pip" install --quiet \
+      playwright sounddevice numpy pyautogui pillow mss
+  ) &
+  spin $! "pip install playwright + voice + GUI deps"
+
+  step "Downloading Chromium for playwright (~400 MB · 1-2 min)"
+  (
+    "$INSTALL_DIR/venv/bin/python3" -m playwright install chromium 2>/dev/null || true
+  ) &
+  spin $! "playwright install chromium"
+fi
 
 # ───────────────────────── shim ─────────────────────────
 
