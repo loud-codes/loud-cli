@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.2.2"
+__version__ = "1.3.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -849,6 +849,317 @@ async def tool_job_stop(label: str) -> str:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
+# ─────── L Floating confirmation modal (used by GUI / voice / browser tools) ───────
+# Cuando LOUD está controlando el navegador o haciendo clicks GUI, el usuario
+# está mirando la pantalla — no la terminal. Por eso usamos un ventanita
+# tkinter siempre-arriba con la L brand y los botones Permitir/Denegar/Editar.
+# Cae a un prompt de terminal si tkinter / display no están disponibles.
+
+def confirm_floating_l(action_title: str, action_body: str,
+                       screenshot_path: str | None = None,
+                       allow_edit: bool = False) -> str:
+    """Returns 'allow' | 'deny' | 'edit'. Always-on-top tkinter window, LOUD-styled."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except ImportError:
+        # Headless fallback
+        cprint(f"\n  L confirm · {action_title}", C.BRAND, bold=True)
+        cprint(f"     {action_body}", C.GRAY)
+        try: ans = (input("  → [y]es / [n]o" + (" / [e]dit" if allow_edit else "") + ": ").strip().lower() or "n")[0]
+        except (EOFError, KeyboardInterrupt): return "deny"
+        return {"y": "allow", "n": "deny", "e": "edit" if allow_edit else "deny"}.get(ans, "deny")
+
+    decision = ["deny"]
+    root = tk.Tk()
+    root.title("LOUD")
+    root.geometry("460x300")
+    root.configure(bg="#0c0e0a")
+    try: root.attributes("-topmost", True)
+    except Exception: pass
+    try: root.attributes("-type", "dialog")
+    except Exception: pass
+
+    # ── Header: L glyph + title
+    head = tk.Frame(root, bg="#0c0e0a"); head.pack(fill="x", padx=22, pady=(18, 8))
+    tk.Label(head, text="L", bg="#0c0e0a", fg="#a2cd65",
+             font=("SF Mono", 32, "bold")).pack(side="left")
+    tk.Label(head, text=action_title, bg="#0c0e0a", fg="#e8e8e8",
+             font=("Helvetica", 14, "bold"), anchor="w", justify="left",
+             wraplength=340).pack(side="left", padx=(14, 0), fill="x", expand=True)
+
+    # ── Body
+    body = tk.Text(root, bg="#0d1015", fg="#cccccc", font=("SF Mono", 11),
+                   bd=0, highlightthickness=1, highlightbackground="#1f2128",
+                   wrap="word", padx=12, pady=10, height=6)
+    body.insert("1.0", action_body)
+    body.config(state="disabled")
+    body.pack(fill="both", expand=True, padx=22, pady=(0, 10))
+
+    # ── Buttons
+    btns = tk.Frame(root, bg="#0c0e0a"); btns.pack(fill="x", padx=22, pady=(0, 18))
+    def _click(d):
+        decision[0] = d
+        root.destroy()
+    def _btn(parent, text, color, accent, action):
+        b = tk.Label(parent, text=text, bg=color, fg=accent,
+                     font=("Helvetica", 12, "bold"),
+                     padx=14, pady=7, cursor="hand2")
+        b.bind("<Button-1>", lambda e: _click(action))
+        return b
+    allow_btn  = _btn(btns, "✓ Permitir",  "#a2cd65", "#0c0e0a", "allow")
+    deny_btn   = _btn(btns, "✗ Cancelar",  "#1f2128", "#cccccc", "deny")
+    allow_btn.pack(side="right", padx=(8, 0))
+    deny_btn.pack(side="right", padx=(0, 0))
+    if allow_edit:
+        edit_btn = _btn(btns, "✎ Editar", "#1f2128", "#e5b450", "edit")
+        edit_btn.pack(side="right", padx=(0, 8))
+
+    # ESC closes as deny
+    root.bind("<Escape>", lambda e: _click("deny"))
+    root.bind("<Return>", lambda e: _click("allow"))
+    # Center on screen
+    root.update_idletasks()
+    w = root.winfo_width(); h = root.winfo_height()
+    sw = root.winfo_screenwidth(); sh = root.winfo_screenheight()
+    root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 3}")
+    try: root.focus_force()
+    except Exception: pass
+    root.mainloop()
+    return decision[0]
+
+
+async def tool_screenshot(label: str | None = None) -> str:
+    """Capture the entire screen using macOS `screencapture` (built-in, no
+    deps). Returns the path. On Linux falls back to `import` (ImageMagick) or
+    `gnome-screenshot`. On Windows expects `mss` (installed via setup gui)."""
+    import time as _t
+    out = Path(LOUD_DIR / "screenshots")
+    out.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", label or "screenshot")[:40]
+    path = out / f"{safe}-{int(_t.time())}.png"
+    try:
+        if IS_MAC:
+            subprocess.run(["screencapture", "-x", str(path)], check=True, timeout=10)
+        elif sys.platform.startswith("linux"):
+            for cmd in (["gnome-screenshot", "-f", str(path)],
+                        ["scrot", str(path)],
+                        ["import", "-window", "root", str(path)]):
+                try:
+                    subprocess.run(cmd, check=True, timeout=10); break
+                except Exception: continue
+            else:
+                return "ERROR: no screenshot tool found. Install scrot or gnome-screenshot."
+        else:
+            try:
+                from mss import mss
+                with mss() as sct:
+                    sct.shot(output=str(path))
+            except ImportError:
+                return "ERROR: install mss for Windows screenshots (loud setup gui)."
+        if not path.exists() or path.stat().st_size < 1024:
+            return f"ERROR: screenshot capture failed (empty/missing file)"
+        return f"screenshot saved · {path} · {path.stat().st_size // 1024} KB"
+    except subprocess.CalledProcessError as e:
+        return f"ERROR: {e}"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+# ─────── Browser control (playwright) ───────
+# Loaded lazily — if playwright isn't installed, the tools return a helpful
+# error pointing at `loud setup gui`. Persistent context per session lives in
+# ~/.loud/browser-data so logins survive between calls.
+
+_BROWSER_STATE: dict = {"context": None, "page": None, "_loop_task": None}
+
+
+async def _browser_get_page():
+    if _BROWSER_STATE.get("page") is not None:
+        return _BROWSER_STATE["page"]
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        raise RuntimeError("playwright no instalado. Corré `loud setup gui` y reintentá.")
+    pw = await async_playwright().start()
+    user_data = LOUD_DIR / "browser-data"
+    user_data.mkdir(parents=True, exist_ok=True)
+    context = await pw.chromium.launch_persistent_context(
+        user_data_dir=str(user_data),
+        headless=False,           # visible — el user mira lo que pasa
+        viewport={"width": 1280, "height": 800},
+        args=["--no-default-browser-check"],
+    )
+    page = await context.new_page() if not context.pages else context.pages[0]
+    _BROWSER_STATE["context"] = context
+    _BROWSER_STATE["page"] = page
+    _BROWSER_STATE["pw"] = pw
+    return page
+
+
+async def tool_browser_open(url: str) -> str:
+    """Abre `url` en el navegador controlado por LOUD (Chromium con contexto
+    persistente). El navegador queda VIVO hasta que el user cierre la ventana
+    o llame browser_close. Sesiones / cookies persisten entre llamadas."""
+    try:
+        page = await _browser_get_page()
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        title = await page.title()
+        return f"abierto · {url}\n  título: {title[:120]}"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_browser_click(selector: str) -> str:
+    """Click sobre un elemento por selector CSS o `text=` de Playwright."""
+    cfg = load_config()
+    if cfg.get("permission_mode") != "yolo":
+        body = f"Hacer click en el selector:\n  {selector}\n\nPágina actual: {(_BROWSER_STATE.get('page') and (await _BROWSER_STATE['page'].url) or '—')}"
+        d = confirm_floating_l("Click en navegador", body)
+        if d != "allow": return f"cancelado por el usuario · decision={d}"
+    try:
+        page = await _browser_get_page()
+        await page.click(selector, timeout=15000)
+        return f"✓ click ejecutado · {selector}"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_browser_fill(selector: str, value: str) -> str:
+    """Llena un input/textarea. SIEMPRE pide permiso porque puede meter datos
+    sensibles (passwords, cards) en formularios."""
+    cfg = load_config()
+    masked = value if len(value) < 6 else value[:2] + "·" * max(3, len(value) - 4) + value[-2:]
+    if cfg.get("permission_mode") != "yolo":
+        body = f"Escribir en el campo:\n  {selector}\n\nValor: {masked}\n\nPágina: {(_BROWSER_STATE.get('page') and (await _BROWSER_STATE['page'].url) or '—')}"
+        d = confirm_floating_l("Llenar campo en navegador", body, allow_edit=True)
+        if d == "edit":
+            import tkinter as tk
+            from tkinter import simpledialog
+            r = tk.Tk(); r.withdraw()
+            new = simpledialog.askstring("Editar valor", "Nuevo valor:", initialvalue=value)
+            r.destroy()
+            if new is None: return "cancelado por el usuario en editar"
+            value = new
+        elif d != "allow":
+            return f"cancelado por el usuario"
+    try:
+        page = await _browser_get_page()
+        await page.fill(selector, value, timeout=15000)
+        return f"✓ field filled · {selector}"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_browser_extract(selector: str) -> str:
+    """Lee texto de un selector. NO requiere permiso (read-only)."""
+    try:
+        page = await _browser_get_page()
+        el = await page.query_selector(selector)
+        if not el: return f"selector sin match: {selector}"
+        text = (await el.inner_text()) or ""
+        return text[:4000]
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_browser_screenshot(label: str | None = None) -> str:
+    """Captura screenshot de la página actual del navegador."""
+    import time as _t
+    try:
+        page = await _browser_get_page()
+        out = LOUD_DIR / "screenshots"; out.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", label or "browser")[:40]
+        path = out / f"{safe}-{int(_t.time())}.png"
+        await page.screenshot(path=str(path), full_page=False)
+        return f"screenshot · {path} · {path.stat().st_size // 1024} KB"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_browser_close() -> str:
+    """Cierra el navegador controlado."""
+    try:
+        ctx = _BROWSER_STATE.get("context")
+        if ctx: await ctx.close()
+        _BROWSER_STATE["context"] = None
+        _BROWSER_STATE["page"] = None
+        return "navegador cerrado"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+# ─────── Voice mode (TTS + STT) ───────
+# Mac TTS uses built-in `say` (no deps). STT records via sounddevice and
+# transcribes via the backend /v1/transcribe (Gemini audio). All voice deps
+# install via `loud setup gui`.
+
+def tts_say(text: str) -> None:
+    """Speak `text` via mac's built-in `say`. Silent no-op on other OS."""
+    if not IS_MAC: return
+    if not text: return
+    # Strip code/markdown so the TTS doesn't read backticks aloud
+    clean = re.sub(r"```[\s\S]*?```", "(bloque de código)", text)
+    clean = re.sub(r"`([^`]+)`", r"\1", clean)
+    clean = re.sub(r"https?://\S+", "(enlace)", clean)
+    clean = re.sub(r"\*\*([^*]+)\*\*", r"\1", clean)
+    clean = re.sub(r"#{1,5}\s+", "", clean)
+    clean = re.sub(r"\s{2,}", " ", clean)[:1200]
+    try:
+        subprocess.Popen(["say", "-v", "Paulina", "-r", "210", clean],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception: pass
+
+
+async def tool_voice_listen(max_seconds: int = 8) -> str:
+    """Record from the mic for up to `max_seconds`, send to the LOUD backend
+    /v1/transcribe (Gemini audio), return the recognized text. Requires
+    `loud setup gui` (installs sounddevice + numpy)."""
+    try:
+        import sounddevice as sd
+        import numpy as np
+        import wave
+        import io
+    except ImportError:
+        return "ERROR: sounddevice/numpy no instalados. Corré `loud setup gui` y reintentá."
+    cprint("  ● listening… (hablá ahora)", C.BRAND, bold=True)
+    samplerate = 16000
+    frames = int(samplerate * max(1, min(max_seconds, 60)))
+    try:
+        rec = sd.rec(frames, samplerate=samplerate, channels=1, dtype="int16")
+        sd.wait()
+    except Exception as e:
+        return f"ERROR: no pude grabar del mic: {e}"
+    # Encode as WAV bytes
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(samplerate)
+        wf.writeframes(rec.tobytes())
+    audio_bytes = buf.getvalue()
+    token = get_token()
+    if not token:
+        return "ERROR: no estás logueado · /login primero"
+    cfg = load_config()
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                f"{cfg['api_url']}/v1/transcribe",
+                content=audio_bytes,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "audio/wav"},
+            )
+            if r.status_code != 200:
+                return f"ERROR: transcribe {r.status_code}: {r.text[:300]}"
+            return (r.json() or {}).get("text", "(silence)")[:4000]
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+def tool_voice_say(text: str) -> str:
+    """Speak `text` via local TTS (mac built-in `say`)."""
+    tts_say(text)
+    return f"✓ spoken · {len(text)} chars"
+
+
 async def tool_ask_oracle(question: str) -> str:
     """One-shot lookup against the private oracle backend. The model uses
     this when it's stuck and needs how-to-fix knowledge (OS error, missing
@@ -1087,6 +1398,68 @@ TOOLS_SCHEMA = [
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     }},
     {"type": "function", "function": {
+        "name": "screenshot",
+        "description": "Capture a screenshot of the user's ENTIRE screen and save it locally. Returns the file path. Use this when the user asks about what's on their screen, or to verify a GUI action took effect. No deps needed on macOS (uses built-in screencapture).",
+        "parameters": {"type": "object", "properties": {
+            "label": {"type": "string", "description": "Optional label for the filename (alphanumeric, no spaces)."}
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_open",
+        "description": "Open a URL in a controlled Chromium browser window (persistent — logins/cookies survive across calls). Requires `loud setup gui`. Visible window so the user can watch what happens.",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"}
+        }, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_click",
+        "description": "Click an element in the controlled browser. selector = CSS selector or Playwright text= form. ALWAYS asks the user for confirmation via a floating LOUD modal.",
+        "parameters": {"type": "object", "properties": {
+            "selector": {"type": "string"}
+        }, "required": ["selector"]},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_fill",
+        "description": "Type into a form field in the controlled browser. ALWAYS asks for confirmation via a floating LOUD modal (passwords are masked in the preview).",
+        "parameters": {"type": "object", "properties": {
+            "selector": {"type": "string"},
+            "value":    {"type": "string"}
+        }, "required": ["selector", "value"]},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_extract",
+        "description": "Read inner text from a selector on the current browser page. No confirmation — read-only.",
+        "parameters": {"type": "object", "properties": {
+            "selector": {"type": "string"}
+        }, "required": ["selector"]},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_screenshot",
+        "description": "Screenshot of the current browser page (just the page, not the whole screen).",
+        "parameters": {"type": "object", "properties": {
+            "label": {"type": "string"}
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "browser_close",
+        "description": "Close the controlled browser entirely.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "voice_listen",
+        "description": "Record from the user's microphone for up to `max_seconds` (default 8) and return the transcribed text. Used when LOUD wants the user to dictate something rather than type. Requires `loud setup gui` for the recording deps.",
+        "parameters": {"type": "object", "properties": {
+            "max_seconds": {"type": "integer", "description": "Recording length cap (default 8, max 60)."}
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "voice_say",
+        "description": "Speak `text` out loud via the system TTS (mac uses built-in `say`). Use this when LOUD wants to announce something to the user audibly.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}
+        }, "required": ["text"]},
+    }},
+    {"type": "function", "function": {
         "name": "ask_oracle",
         "description": "Lookup against the private oracle (Gemini). Use ONLY when you've genuinely tried 2+ approaches to an error and don't know the fix — eg. an unfamiliar OS error message, a tool flag you don't remember, an unusual stack trace. Ask a SPECIFIC technical question; the oracle returns a concise answer with the command/steps to try. The answer is NOT stored anywhere. Don't use it for ordinary terminal questions you can answer with `bash` (`man`, `--help`, `which`).",
         "parameters": {"type": "object", "properties": {
@@ -1125,20 +1498,30 @@ TOOLS_SCHEMA = [
 
 
 TOOL_FNS = {
-    "bash":            tool_bash,
-    "bash_background": tool_bash_background,
-    "job_status":      tool_job_status,
-    "job_list":        tool_job_list,
-    "job_stop":        tool_job_stop,
-    "ssh":             tool_ssh,
-    "read_file":       tool_read_file,
-    "write_file":      tool_write_file,
-    "edit_file":       tool_edit_file,
-    "glob":            tool_glob,
-    "grep":            tool_grep,
-    "ls":              tool_ls,
-    "http_get":        tool_http_get,
-    "ask_oracle":      tool_ask_oracle,
+    "bash":               tool_bash,
+    "bash_background":    tool_bash_background,
+    "job_status":         tool_job_status,
+    "job_list":           tool_job_list,
+    "job_stop":           tool_job_stop,
+    "ssh":                tool_ssh,
+    "read_file":          tool_read_file,
+    "write_file":         tool_write_file,
+    "edit_file":          tool_edit_file,
+    "glob":               tool_glob,
+    "grep":               tool_grep,
+    "ls":                 tool_ls,
+    "http_get":           tool_http_get,
+    "ask_oracle":         tool_ask_oracle,
+    # ── GUI / browser / voice (opt-in via `loud setup gui`) ──
+    "screenshot":         tool_screenshot,
+    "browser_open":       tool_browser_open,
+    "browser_click":      tool_browser_click,
+    "browser_fill":       tool_browser_fill,
+    "browser_extract":    tool_browser_extract,
+    "browser_screenshot": tool_browser_screenshot,
+    "browser_close":      tool_browser_close,
+    "voice_listen":       tool_voice_listen,
+    "voice_say":          tool_voice_say,
 }
 
 
@@ -1505,6 +1888,48 @@ async def cmd_login(cfg: dict, identifier: str | None = None, password: str | No
 async def cmd_logout() -> None:
     clear_auth()
     cprint("  ✓ sesión cerrada", C.GREEN)
+
+
+async def cmd_setup_gui(cfg: dict) -> int:
+    """Install the heavy optional deps that unlock GUI/browser/voice control:
+    playwright (browser automation), sounddevice + numpy (voice STT),
+    pyautogui (GUI click/type), mss + pillow (screenshots on win/linux)."""
+    cprint("\n  Configurando habilidades GUI · browser · voz", C.BRAND, bold=True)
+    venv_pip = Path(__file__).resolve().parents[1] / "venv" / "bin" / "pip"
+    if not venv_pip.exists():
+        # Fall back to whatever pip is on $PATH (system or pyenv)
+        venv_pip_str = "pip3"
+    else:
+        venv_pip_str = str(venv_pip)
+    pkgs = [
+        ("playwright",   "browser automation"),
+        ("sounddevice",  "microphone capture"),
+        ("numpy",        "audio buffers"),
+        ("pyautogui",    "GUI mouse/keyboard"),
+        ("pillow",       "image utilities"),
+        ("mss",          "screen capture (cross-platform)"),
+    ]
+    for pkg, why in pkgs:
+        cprint(f"  · pip install {pkg}  ({why})", C.GRAY)
+        try:
+            subprocess.run([venv_pip_str, "install", "--quiet", pkg], check=True, timeout=180)
+        except subprocess.CalledProcessError as e:
+            cprint(f"    ⚠ pip falló: {e}", C.YELLOW)
+        except FileNotFoundError:
+            cprint(f"    ⚠ pip not found", C.YELLOW)
+    cprint("  · playwright install chromium  (Chromium binary)", C.GRAY)
+    try:
+        subprocess.run([venv_pip_str.replace("pip", "playwright"), "install", "chromium"], check=True, timeout=600)
+    except Exception:
+        # Try via python -m playwright
+        try:
+            subprocess.run(["python3", "-m", "playwright", "install", "chromium"], check=True, timeout=600)
+        except Exception as e:
+            cprint(f"    ⚠ no pude instalar chromium ({e}). Probá manual: `python3 -m playwright install chromium`", C.YELLOW)
+    cprint("\n  ✓ GUI / browser / voice listos.", C.GREEN, bold=True)
+    cprint("    En macOS la primera vez vas a tener que dar permiso de Accesibilidad +", C.GRAY)
+    cprint("    Micrófono + Screen Recording a Terminal/Python en Configuración → Privacidad.", C.GRAY)
+    return 0
 
 
 async def cmd_setup_local(cfg: dict) -> int:
@@ -2048,26 +2473,44 @@ _TOOL_LABEL = {
     "grep":            "Searching",
     "ls":              "Listing",
     "http_get":        "Fetching",
-    "ask_oracle":      "Consulting",
+    "ask_oracle":         "Consulting",
+    "screenshot":         "Capturing",
+    "browser_open":       "Browsing",
+    "browser_click":      "Clicking",
+    "browser_fill":       "Filling",
+    "browser_extract":    "Extracting",
+    "browser_screenshot": "Snapping",
+    "browser_close":      "Closing-browser",
+    "voice_listen":       "Listening",
+    "voice_say":          "Speaking",
 }
 
 # Pretty display names for the "● Tool(args)" call header — matches the
 # Claude-Code style. Falls back to the raw tool name when not in this map.
 _TOOL_DISPLAY = {
-    "bash":            "Bash",
-    "bash_background": "Background",
-    "job_status":      "JobStatus",
-    "job_list":        "JobList",
-    "job_stop":        "JobStop",
-    "ssh":             "SSH",
-    "read_file":       "Read",
-    "write_file":      "Write",
-    "edit_file":       "Update",
-    "glob":            "Glob",
-    "grep":            "Search",
-    "ls":              "List",
-    "http_get":        "Fetch",
-    "ask_oracle":      "Oracle",
+    "bash":               "Bash",
+    "bash_background":    "Background",
+    "job_status":         "JobStatus",
+    "job_list":           "JobList",
+    "job_stop":           "JobStop",
+    "ssh":                "SSH",
+    "read_file":          "Read",
+    "write_file":         "Write",
+    "edit_file":          "Update",
+    "glob":               "Glob",
+    "grep":               "Search",
+    "ls":                 "List",
+    "http_get":           "Fetch",
+    "ask_oracle":         "Oracle",
+    "screenshot":         "Screenshot",
+    "browser_open":       "Browser",
+    "browser_click":      "BrowserClick",
+    "browser_fill":       "BrowserFill",
+    "browser_extract":    "BrowserExtract",
+    "browser_screenshot": "BrowserShot",
+    "browser_close":      "BrowserClose",
+    "voice_listen":       "VoiceListen",
+    "voice_say":          "VoiceSay",
 }
 
 
@@ -2742,7 +3185,9 @@ async def main_async(args: argparse.Namespace) -> int:
             target = (args.question[1] if len(args.question) > 1 else "").lower()
             if target == "local":
                 return await cmd_setup_local(cfg)
-            cprint("  · uso: loud setup local", C.YELLOW)
+            if target == "gui":
+                return await cmd_setup_gui(cfg)
+            cprint("  · uso: loud setup local · loud setup gui", C.YELLOW)
             return 1
         if sub == "mode":
             target = (args.question[1] if len(args.question) > 1 else "").lower()
