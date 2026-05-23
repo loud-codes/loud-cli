@@ -205,6 +205,24 @@ Switch with `loud --model loud-2.0` or `/model loud-2.0` inside the REPL.
 
 ---
 
+## Public consult API
+
+LOUD also exposes a public HTTP endpoint so other apps / scripts / agents can query it without a user session.
+
+```bash
+curl -sS -X POST https://api.loud.codes/v1/api/chat \
+  -H "X-User-Email: you@invite.com" \
+  -H "X-API-Key: loud_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"...", "model":"loud-pro"}'
+```
+
+API keys are minted from the admin dashboard at `https://loud.codes` → **API Keys** → **+ Crear API key**. The raw key is shown ONCE and stored as a hash; auth requires both your email AND the key, so a leaked key alone is unusable.
+
+The key only authorises `/v1/api/chat` — never admin or knowledge endpoints. Naming each key per integration (eg. `n8n-flow`, `my-app-prod`) makes targeted revocation simple.
+
+---
+
 ## Security
 
 - Internal IPs and infra hostnames are **scrubbed** from every line the CLI prints.
