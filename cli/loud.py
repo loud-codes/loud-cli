@@ -3,8 +3,7 @@
 
 Es un agente local que vive en tu terminal, conectado a tu LOUD privada
 (self-hosted). Lee, escribe, edita archivos, corre comandos, todo con
-permisos explícitos por acción — tipo Claude Code, Cursor, Aider — pero
-sobre TU modelo y TU dato.
+permisos explícitos por acción — sobre TU modelo y TU dato.
 
 Comandos:
     loud                        # REPL interactivo
@@ -39,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.3.6"
+__version__ = "1.3.7"
 
 # ───────────────────── Config ─────────────────────
 
@@ -928,6 +927,67 @@ def confirm_floating_l(action_title: str, action_body: str,
     return decision[0]
 
 
+async def tool_apps_list() -> str:
+    """List installed applications on the user's machine. Use when the user
+    asks 'qué programas / apps tengo', 'lista mis programas', 'what apps do
+    I have', etc."""
+    try:
+        out = []
+        if IS_MAC:
+            for root in ("/Applications", "/System/Applications", str(Path.home() / "Applications")):
+                p = Path(root)
+                if not p.exists(): continue
+                for app in sorted(p.glob("*.app")):
+                    out.append(app.stem)
+                for sub in sorted(p.glob("*/")):
+                    for app in sorted(sub.glob("*.app")):
+                        out.append(f"{sub.name}/{app.stem}")
+            seen = set(); deduped = []
+            for n in out:
+                if n in seen: continue
+                seen.add(n); deduped.append(n)
+            return f"{len(deduped)} apps:\n  " + "\n  ".join(deduped[:200])
+        if sys.platform.startswith("linux"):
+            r = subprocess.run(
+                ["bash", "-c", "ls /usr/share/applications/*.desktop ~/.local/share/applications/*.desktop 2>/dev/null | xargs -n1 basename -s .desktop"],
+                capture_output=True, text=True, timeout=10)
+            return r.stdout.strip() or "(no .desktop files found)"
+        if IS_WINDOWS:
+            return "ERROR: apps_list en Windows: usá bash con Get-StartApps o similar"
+        return "ERROR: SO no soportado"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_app_open(name: str) -> str:
+    """Open an installed application BY NAME. macOS uses `open -a`, Linux
+    tries gtk-launch or xdg-open, Windows uses `start`. Use this when the
+    user says 'abrime Chrome', 'open Spotify', 'andá a VS Code', etc."""
+    if not name or not name.strip():
+        return "ERROR: necesito el nombre de la app"
+    try:
+        if IS_MAC:
+            r = subprocess.run(["open", "-a", name.strip()], capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return f"ERROR: no encontré la app '{name}'. Probá `apps_list` para ver disponibles."
+            return f"✓ abriendo {name}"
+        if sys.platform.startswith("linux"):
+            for cmd in (["gtk-launch", name], ["xdg-open", name]):
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if r.returncode == 0: return f"✓ abriendo {name}"
+                except Exception: continue
+            return f"ERROR: no pude abrir {name} (probé gtk-launch y xdg-open)"
+        if IS_WINDOWS:
+            subprocess.Popen(["cmd", "/c", "start", "", name])
+            return f"✓ abriendo {name}"
+        return "ERROR: SO no soportado"
+    except subprocess.TimeoutExpired:
+        return "ERROR: timeout abriendo la app"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
 async def tool_screenshot(label: str | None = None) -> str:
     """Capture the entire screen using macOS `screencapture` (built-in, no
     deps). Returns the path. On Linux falls back to `import` (ImageMagick) or
@@ -1515,6 +1575,18 @@ TOOLS_SCHEMA = [
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     }},
     {"type": "function", "function": {
+        "name": "apps_list",
+        "description": "List installed applications on the user's machine. Use when the user asks 'qué programas tengo', 'lista mis apps', 'what programs do I have installed'. macOS scans /Applications and ~/Applications.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "app_open",
+        "description": "Open an installed app BY NAME (eg 'Chrome', 'Spotify', 'VS Code', 'Telegram'). Use when the user EXPLICITLY says 'abrime <app>', 'open <app>', 'andá a <app>'. NOT for URLs — for URLs use browser_open.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "App name as it appears in /Applications (without .app)."}
+        }, "required": ["name"]},
+    }},
+    {"type": "function", "function": {
         "name": "screenshot",
         "description": "Capture a screenshot of the user's ENTIRE screen and save it locally. Returns the file path. Use this when the user asks about what's on their screen, or to verify a GUI action took effect. No deps needed on macOS (uses built-in screencapture).",
         "parameters": {"type": "object", "properties": {
@@ -1630,6 +1702,8 @@ TOOL_FNS = {
     "http_get":           tool_http_get,
     "ask_oracle":         tool_ask_oracle,
     # ── GUI / browser / voice (opt-in via `loud setup gui`) ──
+    "apps_list":          tool_apps_list,
+    "app_open":           tool_app_open,
     "screenshot":         tool_screenshot,
     "browser_open":       tool_browser_open,
     "browser_click":      tool_browser_click,
@@ -1686,10 +1760,14 @@ Para CUALQUIER OTRO pedido (correr comandos, leer archivos, instalar paquetes, d
 
 Ej:
 - "qué versión de python tengo" → `bash`, NO browser
-- "abreme google.com" → `browser_open`
+- "abreme google.com" → `browser_open` (URL)
+- "abrime Chrome" / "open Spotify" / "andá a VS Code" → `app_open(name)` (app local)
+- "qué programas tengo instalados" → `apps_list()`
 - "instala docker" → `bash`, NO browser ("instalar" ≠ "abrir ventana")
 - "lista los archivos de Descargas" → `ls`, NO screenshot
 - "mostrame mi pantalla" → `screenshot` (pidió ver la pantalla)
+
+**Diferencia clave:** `browser_open(url)` es para URLs y páginas web. `app_open(name)` es para aplicaciones locales del usuario (Chrome, Spotify, Telegram, VS Code, etc.). Si el usuario dice "abreme Chrome" y NO menciona una URL → `app_open("Chrome")`. Si dice "abreme google.com" → `browser_open("https://google.com")`.
 
 # TOOLS DISPONIBLES
 Llamadas tipo `function call`. El CLI las ejecuta en la máquina del usuario y te muestra el resultado tipo `● Tool(args) → ⎿ output`.
@@ -1963,7 +2041,7 @@ def get_token() -> str:
 
 
 async def cmd_login(cfg: dict, identifier: str | None = None, password: str | None = None) -> bool:
-    """Browser-based device-flow login. Same UX as Claude Code / gh CLI:
+    """Browser-based device-flow login:
       1. We open the browser to a verification URL with a session code
       2. User logs in on the web (or is already logged in) and clicks "Approve"
       3. We poll the server until the token shows up, then save it locally
@@ -2515,8 +2593,7 @@ _STREAM_STATE = {"col": 0, "indent_done": False, "in_fence": False}
 def terminal_layout() -> tuple[int, int, int]:
     """Returns (cols, content_width, left_pad). Content is rendered inside a
     centered band capped at 92 columns so the layout stays uniform whether the
-    user widens or narrows the terminal — identical to how Claude Code keeps
-    its content centered. Mirror of the banner geometry below."""
+    user widens or narrows the terminal. Mirror of the banner geometry below."""
     try:
         cols = shutil.get_terminal_size((100, 24)).columns
     except Exception:
@@ -2631,6 +2708,8 @@ _TOOL_LABEL = {
     "ls":              "Listing",
     "http_get":        "Fetching",
     "ask_oracle":         "Consulting",
+    "apps_list":          "Listing-apps",
+    "app_open":           "Launching",
     "screenshot":         "Capturing",
     "browser_open":       "Browsing",
     "browser_click":      "Clicking",
@@ -2642,8 +2721,8 @@ _TOOL_LABEL = {
     "voice_say":          "Speaking",
 }
 
-# Pretty display names for the "● Tool(args)" call header — matches the
-# Claude-Code style. Falls back to the raw tool name when not in this map.
+# Pretty display names for the "● Tool(args)" call header — LOUD console
+# style. Falls back to the raw tool name when not in this map.
 _TOOL_DISPLAY = {
     "bash":               "Bash",
     "bash_background":    "Background",
@@ -2659,6 +2738,8 @@ _TOOL_DISPLAY = {
     "ls":                 "List",
     "http_get":           "Fetch",
     "ask_oracle":         "Oracle",
+    "apps_list":          "AppsList",
+    "app_open":           "AppOpen",
     "screenshot":         "Screenshot",
     "browser_open":       "Browser",
     "browser_click":      "BrowserClick",
@@ -2705,7 +2786,7 @@ def _format_tool_call_header(name: str, args: dict) -> str:
 
 
 def _print_tool_block(name: str, args: dict, result: str, max_output_lines: int = 8) -> None:
-    """Render a tool invocation + its result in Claude-Code style:
+    """Render a tool invocation + its result in LOUD console style:
 
       ● Bash(python3 --version)
         ⎿  Python 3.14.5
@@ -2829,7 +2910,7 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                     # Client-side tool execution
                     if name in TOOL_FNS:
                         await spinner.stop()
-                        # Claude-Code-style header: '● Bash(python3 --version)'
+                        # LOUD console header: '● Bash(python3 --version)'
                         header = _format_tool_call_header(name, args)
                         sys.stdout.write(f"\n  {C.BRAND}●{C.RESET} {C.BOLD}{header}{C.RESET}\n"); sys.stdout.flush()
                         decision = request_permission(cfg, name, args)
@@ -2973,7 +3054,7 @@ def reset_session() -> None:
 # ───────────────────── REPL ─────────────────────
 
 def render_banner(cfg: dict) -> str:
-    """Claude-Code-style welcome box with LOUD branding.
+    """LOUD welcome box with brand banner.
 
     Always shown when entering the REPL. Reflects whether the user is logged
     in or not — login is a `/login` slash command, never blocks startup."""
@@ -3231,7 +3312,7 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
         # ── Auth gate: only checked here, not at startup ──
         # We let the user enter the REPL, see the welcome, look around, etc.
         # without forcing login. The check only kicks in when they actually
-        # want to chat (same UX as Claude Code).
+        # want to chat.
         if not get_token():
             cprint("", "")
             cprint("  ┌─ no estás logueado", C.YELLOW, bold=True)
@@ -3326,10 +3407,10 @@ async def main_async(args: argparse.Namespace) -> int:
         cprint("  ⚠ --dangerously-skip-permissions ACTIVO · sin prompts para acciones benignas/medias", C.RED, bold=True)
         cprint("    (las acciones a nivel de sistema siguen pidiendo confirmación)", C.GRAY)
 
-    # Claude-Code-style flow: NO forced login at startup. The REPL starts
-    # whether you're logged in or not — the banner shows the auth state and
-    # the user can `/login` when ready. We only require auth at the moment
-    # the user actually sends a chat message.
+    # LOUD flow: NO forced login at startup. The REPL starts whether you're
+    # logged in or not — the banner shows the auth state and the user can
+    # `/login` when ready. We only require auth at the moment the user
+    # actually sends a chat message.
     #
     # Save config on first run so we don't re-create it every time.
     if not CONFIG_FILE.exists():
