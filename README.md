@@ -81,7 +81,7 @@ chmod +x ~/.local/bin/loud
 $ loud
 ```
 
-First run walks you through a 30-second setup: confirm the server URL, pick a permission mode (`ask` / `yolo` / `safe`), and log in. After that you land in a Claude-Code-style REPL.
+First run walks you through a 30-second setup: confirm the server URL, pick a permission mode (`ask` / `yolo` / `safe`), and log in. After that you land in an interactive LOUD REPL.
 
 ```
 ╭────────────────────────────────────────────────────────────╮
@@ -305,7 +305,7 @@ brew uninstall loud
 
 ## Changelog
 
-### v0.7.0 — Claude-Code-style REPL · 2026-05-22
+### v0.7.0 — Interactive LOUD REPL · 2026-05-22
 
 - 🎯 **No more forced login at startup** — type `loud` and you enter the REPL
   immediately. The welcome banner shows your status ("● signed in" or

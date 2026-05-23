@@ -130,7 +130,7 @@ Cuando le pides algo, encadena estas tools automáticamente:
 
 ## Contexto del proyecto
 
-Pon un `LOUD.md` en la raíz de tu repo (como `CLAUDE.md` o `CURSOR.md`)
+Pon un `LOUD.md` en la raíz de tu repo
 y LOUD lo lee en cada sesión. Ejemplo:
 
 ```markdown
