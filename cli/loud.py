@@ -39,7 +39,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
 # ───────────────────── Config ─────────────────────
 
@@ -60,7 +60,7 @@ DEFAULT_CONFIG = {
     # job_status. Users can downshift with --model loud-go for raw speed.
     "model": "loud-pro",
     "max_iterations": 50,    # multi-step plans + self-recovery on errors need room
-    "permission_mode": "ask",      # ask | safe (safe = block destructive ops)
+    "permission_mode": "ask",      # ask | yolo | safe (safe = block destructive ops)
     "typewriter": True,
     # Compute mode for chat inference:
     #   "cloud"  → talk to api.loud.codes (full brain, RAG, auto-nurture)
@@ -458,10 +458,15 @@ def request_permission(cfg: dict, tool: str, args: dict) -> str:
     user picks 'edit'. When the user picks 'always', a sub-selector lets them
     pick the SCOPE of the always-rule (exact / verb / folder / recursive)."""
     mode = cfg.get("permission_mode", "ask")
-    # The "yolo" mode was retired in v1.3.2. If we ever see it in old configs
-    # we silently treat it as "ask" so the prompt flow still runs.
+    # YOLO: skip prompts for benign + medium-impact, but ALWAYS prompt for
+    # system-level ops (sudo, /etc, force-push, package managers, firewall…).
+    # That keeps unattended agents from punching real holes.
     if mode == "yolo":
-        mode = "ask"
+        if is_system_destructive(tool, args):
+            cprint("  ⚠ acción a nivel de sistema — yolo NO la salta, te pregunto", C.YELLOW, bold=True)
+            # fall through to interactive prompt
+        else:
+            return "allow"
     # Benign reads (--version, ls, cat, which, ps, git status, pwd, echo…) and
     # all non-state-changing tools auto-allow even in ask mode. Only commands
     # that ACTUALLY mutate state trip the prompt. This is what makes the CLI
@@ -1007,7 +1012,7 @@ async def tool_browser_open(url: str) -> str:
 async def tool_browser_click(selector: str) -> str:
     """Click sobre un elemento por selector CSS o `text=` de Playwright."""
     cfg = load_config()
-    if True:  # always confirm via the floating L modal — yolo removed
+    if cfg.get("permission_mode") != "yolo":
         body = f"Hacer click en el selector:\n  {selector}\n\nPágina actual: {(_BROWSER_STATE.get('page') and (await _BROWSER_STATE['page'].url) or '—')}"
         d = confirm_floating_l("Click en navegador", body)
         if d != "allow": return f"cancelado por el usuario · decision={d}"
@@ -1024,7 +1029,7 @@ async def tool_browser_fill(selector: str, value: str) -> str:
     sensibles (passwords, cards) en formularios."""
     cfg = load_config()
     masked = value if len(value) < 6 else value[:2] + "·" * max(3, len(value) - 4) + value[-2:]
-    if True:  # always confirm via the floating L modal — yolo removed
+    if cfg.get("permission_mode") != "yolo":
         body = f"Escribir en el campo:\n  {selector}\n\nValor: {masked}\n\nPágina: {(_BROWSER_STATE.get('page') and (await _BROWSER_STATE['page'].url) or '—')}"
         d = confirm_floating_l("Llenar campo en navegador", body, allow_edit=True)
         if d == "edit":
@@ -2208,7 +2213,7 @@ async def setup_wizard(cfg: dict) -> None:
     cprint("    [s]afe  — bloquea cualquier acción destructiva", C.GRAY)
     cprint("  → [a/y/s] ", C.BRAND, bold=True, end="")
     mode = (input().strip().lower() or "a")[0]
-    cfg["permission_mode"] = {"a": "ask", "s": "safe"}.get(mode, "ask")
+    cfg["permission_mode"] = {"a": "ask", "y": "yolo", "s": "safe"}.get(mode, "ask")
     save_config(cfg)
 
     cprint(f"\n  Login a {cfg['api_url']}", C.BRAND, bold=True)
@@ -3008,7 +3013,7 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
             elif cmd == "/permissions":
                 sub = arg.strip().split()
                 action = sub[0] if sub else ""
-                if action in ("ask", "safe"):
+                if action in ("ask", "yolo", "safe"):
                     cfg["permission_mode"] = action
                     save_config(cfg)
                     cprint(f"  · permisos: {cfg.get('permission_mode')}", C.YELLOW)
@@ -3187,12 +3192,13 @@ async def main_async(args: argparse.Namespace) -> int:
         cfg["mode"] = "cloud"
     if getattr(args, "auto", False):
         cfg["mode"] = "auto"
-    # The --yolo / --dangerously-skip-permissions flag was removed in v1.3.2.
-    # Every destructive action goes through the permission flow, no shortcuts.
-    if cfg.get("permission_mode") == "yolo":
-        cfg["permission_mode"] = "ask"
-        save_config(cfg)
-        cprint("  · permission_mode 'yolo' fue retirado — usando 'ask'", C.YELLOW)
+    if getattr(args, "yolo", False):
+        # --dangerously-skip-permissions / --yolo: ephemeral for this run only.
+        # We do NOT persist this to config.json — keep it as a per-invocation
+        # opt-in. System-destructive ops still prompt even in yolo.
+        cfg["permission_mode"] = "yolo"
+        cprint("  ⚠ --dangerously-skip-permissions ACTIVO · sin prompts para acciones benignas/medias", C.RED, bold=True)
+        cprint("    (las acciones a nivel de sistema siguen pidiendo confirmación)", C.GRAY)
 
     # Claude-Code-style flow: NO forced login at startup. The REPL starts
     # whether you're logged in or not — the banner shows the auth state and
@@ -3281,6 +3287,9 @@ def main() -> int:
     parser.add_argument("--local",  action="store_true", help="Forzar modo local (Ollama 127.0.0.1)")
     parser.add_argument("--cloud",  action="store_true", help="Forzar modo cloud (api.loud.codes)")
     parser.add_argument("--auto",   action="store_true", help="Modo híbrido: local si está arriba, sino cloud")
+    parser.add_argument("--dangerously-skip-permissions", "--yolo", action="store_true",
+                        dest="yolo",
+                        help="Salta prompts de permiso para acciones benignas + medias. Las acciones de SISTEMA (sudo, /etc, force-push, package managers) siguen pidiendo confirmación incluso con --yolo.")
     parser.add_argument("--exit-after", action="store_true", dest="exit_after",
                         help="Sale después del prompt one-shot (CI/scripts). Por default loud queda en REPL.")
     parser.add_argument("--version", action="version", version=f"loud {__version__}")
