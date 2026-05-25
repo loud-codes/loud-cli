@@ -78,6 +78,10 @@ if (-not $env:LOUD_SKIP_GUI) {
   & $VenvPython -m pip install --quiet playwright sounddevice numpy pyautogui pillow mss
   Ok "playwright + voice + GUI deps installed"
 
+  Step "Installing Scrapling (scrape / scrape_stealth / scrape_dynamic)"
+  & $VenvPython -m pip install --quiet "scrapling[fetchers]"
+  Ok "scrapling[fetchers] installed"
+
   Step "Downloading Chromium for playwright (~400 MB)"
   try {
     & $VenvPython -m playwright install chromium

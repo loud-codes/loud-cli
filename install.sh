@@ -127,6 +127,12 @@ if [ -z "$LOUD_SKIP_GUI" ]; then
   ) &
   spin $! "pip install playwright + voice + GUI deps"
 
+  step "Installing Scrapling (scrape / scrape_stealth / scrape_dynamic)"
+  (
+    "$INSTALL_DIR/venv/bin/pip" install --quiet "scrapling[fetchers]"
+  ) &
+  spin $! "pip install scrapling[fetchers]"
+
   step "Downloading Chromium for playwright (~400 MB · 1-2 min)"
   (
     "$INSTALL_DIR/venv/bin/python3" -m playwright install chromium 2>/dev/null || true

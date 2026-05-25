@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.3.8"
+__version__ = "1.5.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -1397,8 +1397,25 @@ async def tool_ssh(host: str, cmd: str, timeout: int = 60) -> str:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
+def _norm_path(p: str) -> str:
+    # Why: the LLM frequently echoes shell-escaped paths from the user prompt
+    # (e.g. `My\ Folder/file.txt`) straight into tool args. shlex unescapes
+    # them. Only kicks in if `\` is present AND the result is a single token,
+    # so genuine paths-with-spaces and paths-with-literal-backslashes pass
+    # through unchanged.
+    if not p or "\\" not in p:
+        return p
+    try:
+        tokens = shlex.split(p)
+        if len(tokens) == 1:
+            return tokens[0]
+    except ValueError:
+        pass
+    return p
+
+
 async def tool_read_file(path: str, max_lines: int = 600) -> str:
-    p = Path(path).expanduser()
+    p = Path(_norm_path(path)).expanduser()
     try:
         if not p.exists():
             return f"ERROR: not found: {p}"
@@ -1412,7 +1429,7 @@ async def tool_read_file(path: str, max_lines: int = 600) -> str:
 
 
 async def tool_write_file(path: str, content: str) -> str:
-    p = Path(path).expanduser()
+    p = Path(_norm_path(path)).expanduser()
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -1423,7 +1440,7 @@ async def tool_write_file(path: str, content: str) -> str:
 
 async def tool_edit_file(path: str, old: str, new: str) -> str:
     """Replace first occurrence of `old` with `new` in the file."""
-    p = Path(path).expanduser()
+    p = Path(_norm_path(path)).expanduser()
     try:
         if not p.exists():
             return f"ERROR: not found: {p}"
@@ -1440,7 +1457,7 @@ async def tool_edit_file(path: str, old: str, new: str) -> str:
 
 
 async def tool_glob(pattern: str, path: str = ".") -> str:
-    base = Path(path).expanduser().resolve()
+    base = Path(_norm_path(path)).expanduser().resolve()
     try:
         matches = sorted(base.glob(pattern))
         if not matches:
@@ -1460,7 +1477,7 @@ async def tool_glob(pattern: str, path: str = ".") -> str:
 
 
 async def tool_grep(pattern: str, path: str = ".", max_results: int = 80) -> str:
-    p = Path(path).expanduser()
+    p = Path(_norm_path(path)).expanduser()
     rg = shutil.which("rg")
     if rg:
         cmd = [rg, "--no-heading", "--with-filename", "--line-number", "--max-count", "10", pattern, str(p)]
@@ -1482,7 +1499,7 @@ async def tool_grep(pattern: str, path: str = ".", max_results: int = 80) -> str
 
 
 async def tool_ls(path: str = ".") -> str:
-    p = Path(path).expanduser().resolve()
+    p = Path(_norm_path(path)).expanduser().resolve()
     try:
         entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
         lines = [f"pwd: {p}"]
@@ -1508,6 +1525,149 @@ async def tool_http_get(url: str, max_bytes: int = 8000) -> str:
             if "text" in ct or "json" in ct or "xml" in ct or "html" in ct:
                 return r.text[:max_bytes]
             return f"[binary {ct}, {len(r.content)} bytes]"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+def _format_scrape(page, css: str | None, max_chars: int) -> str:
+    header = f"[status {getattr(page, 'status', '?')} · {getattr(page, 'url', '?')}]"
+    if css:
+        sel = css if ("::text" in css or "::attr" in css) else css + "::text"
+        try:
+            raw = page.css(sel).getall()
+        except Exception:
+            raw = []
+        matches = [m.strip() for m in raw if m and m.strip()]
+        if not matches:
+            return f"{header}\n(no matches for {css})"
+        lines = [header]
+        for i, m in enumerate(matches[:50]):
+            if len(m) > 240:
+                m = m[:240] + "…"
+            lines.append(f"  {i + 1}. {m}")
+        if len(matches) > 50:
+            lines.append(f"  [... {len(matches) - 50} more matches]")
+        return "\n".join(lines)
+    try:
+        text = page.get_all_text() if hasattr(page, "get_all_text") else str(page)
+    except Exception:
+        text = (page.body.decode("utf-8", errors="replace") if isinstance(getattr(page, "body", None), bytes) else "")
+    text = text.strip()
+    if len(text) > max_chars:
+        return f"{header}\n{text[:max_chars]}\n\n[truncated · {len(text) - max_chars} more chars, total {len(text)}]"
+    return f"{header}\n{text}"
+
+
+async def tool_scrape(url: str, css: str | None = None, max_chars: int = 8000) -> str:
+    try:
+        from scrapling.fetchers import Fetcher
+    except ImportError:
+        return "ERROR: scrapling not installed. Run: pip install 'scrapling[fetchers]' && scrapling install"
+    try:
+        page = await asyncio.to_thread(Fetcher.get, url, follow_redirects=True)
+        return _format_scrape(page, css, max_chars)
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_scrape_stealth(url: str, css: str | None = None, solve_cloudflare: bool = False, max_chars: int = 8000) -> str:
+    try:
+        from scrapling.fetchers import StealthyFetcher
+    except ImportError:
+        return "ERROR: scrapling[fetchers] not installed. Run: scrapling install"
+    try:
+        page = await asyncio.to_thread(
+            StealthyFetcher.fetch, url,
+            headless=True, solve_cloudflare=solve_cloudflare,
+        )
+        return _format_scrape(page, css, max_chars)
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_scrape_dynamic(url: str, css: str | None = None, max_chars: int = 8000) -> str:
+    try:
+        from scrapling.fetchers import DynamicFetcher
+    except ImportError:
+        return "ERROR: scrapling[fetchers] not installed. Run: scrapling install"
+    try:
+        page = await asyncio.to_thread(
+            DynamicFetcher.fetch, url,
+            headless=True, network_idle=True,
+        )
+        return _format_scrape(page, css, max_chars)
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+_CULT_UI_REGISTRY = "https://www.cult-ui.com/r/registry.json"
+_CULT_UI_COMPONENT = "https://www.cult-ui.com/r/{name}.json"
+_cult_ui_cache: dict = {}
+
+
+async def tool_cult_ui_list(filter: str | None = None) -> str:
+    """List every cult-ui component (157+). Use BEFORE generating any UI to find the right component."""
+    try:
+        if "items" not in _cult_ui_cache:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(_CULT_UI_REGISTRY, headers={"User-Agent": "loud-cli"})
+                r.raise_for_status()
+                _cult_ui_cache["items"] = r.json().get("items", [])
+        items = _cult_ui_cache["items"]
+        if filter:
+            f = filter.lower()
+            items = [it for it in items if f in (it.get("name", "") + " " + it.get("description", "")).lower()]
+        lines = [f"cult-ui · {len(items)} components" + (f" matching '{filter}'" if filter else "")]
+        for it in items[:200]:
+            name = it.get("name", "?")
+            desc = (it.get("description") or "").strip()
+            if len(desc) > 90:
+                desc = desc[:90] + "…"
+            lines.append(f"  {name:32}  {desc}")
+        if len(items) > 200:
+            lines.append(f"  [... {len(items) - 200} more — refine with filter=]")
+        lines.append("")
+        lines.append("→ Para insertar un componente en un proyecto Next/React: `npx shadcn@latest add https://www.cult-ui.com/r/<name>.json`")
+        lines.append("→ Para ver el código fuente sin instalar: usa `cult_ui_get(name)`")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+
+async def tool_cult_ui_get(name: str) -> str:
+    """Fetch a single cult-ui component: deps, source code, and the exact shadcn install command."""
+    name = name.strip().lstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            r = await client.get(_CULT_UI_COMPONENT.format(name=name), headers={"User-Agent": "loud-cli"})
+            if r.status_code == 404:
+                return f"ERROR: component '{name}' not found. Run cult_ui_list to see all 157 names."
+            r.raise_for_status()
+            data = r.json()
+        out = []
+        out.append(f"# cult-ui · {data.get('name', name)}")
+        if data.get("description"):
+            out.append(f"_{data['description']}_")
+        out.append("")
+        out.append(f"**Install (shadcn CLI):**  `npx shadcn@latest add https://www.cult-ui.com/r/{name}.json`")
+        deps = data.get("dependencies") or []
+        if deps:
+            out.append(f"**Peer deps:**  {', '.join(deps)}")
+        reg_deps = data.get("registryDependencies") or []
+        if reg_deps:
+            out.append(f"**Registry deps:**  {', '.join(reg_deps)}")
+        out.append("")
+        for f in data.get("files", []) or []:
+            content = f.get("content") or ""
+            path = f.get("path") or f.get("target") or "?"
+            out.append(f"## `{path}`")
+            out.append("```tsx")
+            if len(content) > 12000:
+                out.append(content[:12000] + "\n// [... truncated, fetch JSON directly to see the rest]")
+            else:
+                out.append(content)
+            out.append("```")
+        return "\n".join(out)
     except Exception as e:
         return f"ERROR: {type(e).__name__}: {e}"
 
@@ -1571,8 +1731,50 @@ TOOLS_SCHEMA = [
     }},
     {"type": "function", "function": {
         "name": "http_get",
-        "description": "Fetch the body of an HTTP/HTTPS URL.",
+        "description": "Fetch the body of an HTTP/HTTPS URL. Plain HTTP, no parsing. Use `scrape` instead when you want CSS selectors or clean readable text.",
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "scrape",
+        "description": "Fast HTTP scraper (Scrapling). Returns clean readable text from a URL, OR — if `css` is given — extracts matches. Pass a CSS selector WITHOUT `::text` (eg `h1`, `.price`, `article p`) and the tool will return text content of each match. For `::attr(href)` etc. include the pseudo. This is the right default when the user says 'scrape', 'sacame el contenido de', 'extrae X de esta URL'. Falls back to `scrape_dynamic` if the site needs JS, or `scrape_stealth` if anti-bot blocks it.",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "css": {"type": "string", "description": "Optional CSS selector for targeted extraction (eg `h2`, `.product-title`, `a::attr(href)`)."},
+            "max_chars": {"type": "integer", "description": "Max chars to return when no css (default 8000)."}
+        }, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "scrape_stealth",
+        "description": "Anti-bot scraper (Scrapling StealthyFetcher) — fingerprint spoofing + patched Chromium. Use SOLO cuando `scrape` falla por bloqueo (Cloudflare challenge, Distil, PerimeterX, 403/503 anti-bot, captcha). Slower (~5-15s). Set `solve_cloudflare=true` para que intente resolver el JS challenge de Cloudflare.",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "css": {"type": "string"},
+            "solve_cloudflare": {"type": "boolean", "description": "Try to auto-solve Cloudflare JS challenge (default false — más lento si true)."},
+            "max_chars": {"type": "integer"}
+        }, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "scrape_dynamic",
+        "description": "Render JS-heavy pages with real Chromium (Scrapling DynamicFetcher), then parse. Use cuando `scrape` devuelve HTML vacío o sin el contenido esperado porque el sitio es una SPA (React/Vue/Next con render client-side). Más rápido que `scrape_stealth` pero NO bypassa anti-bot.",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "css": {"type": "string"},
+            "max_chars": {"type": "integer"}
+        }, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "cult_ui_list",
+        "description": "Lista los 157+ componentes de cult-ui (biblioteca de UI premium con animaciones, shaders, glass, gradient borders, dynamic island, etc — todo Tailwind+Motion+TS). Úsala ANTES de generar cualquier UI/landing/dashboard/hero/card/button. Pasa `filter` para buscar (eg 'hero', 'button', 'card', 'animated', 'glass'). El resultado te da nombre + descripción 1-línea de cada componente. Es la mejor forma de NO tirar diseño genérico.",
+        "parameters": {"type": "object", "properties": {
+            "filter": {"type": "string", "description": "Filtro opcional case-insensitive (eg 'hero', 'card', 'animated')."}
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "cult_ui_get",
+        "description": "Trae el código fuente completo de UN componente cult-ui por nombre (eg 'shift-card', 'dynamic-island', 'cosmic-button', 'hero-liquid-metal'). Devuelve dependencias npm + comando exacto de `shadcn add` + el .tsx completo listo para copiar/pegar al proyecto. Úsalo cuando vas a usar un componente concreto.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Nombre exacto del componente (kebab-case, eg 'texture-card', 'family-button')."}
+        }, "required": ["name"]},
     }},
     {"type": "function", "function": {
         "name": "apps_list",
@@ -1700,6 +1902,11 @@ TOOL_FNS = {
     "grep":               tool_grep,
     "ls":                 tool_ls,
     "http_get":           tool_http_get,
+    "scrape":             tool_scrape,
+    "scrape_stealth":     tool_scrape_stealth,
+    "scrape_dynamic":     tool_scrape_dynamic,
+    "cult_ui_list":       tool_cult_ui_list,
+    "cult_ui_get":        tool_cult_ui_get,
     "ask_oracle":         tool_ask_oracle,
     # ── GUI / browser / voice (opt-in via `loud setup gui`) ──
     "apps_list":          tool_apps_list,
@@ -1771,6 +1978,22 @@ Antes de invocar cualquier tool, preguntáte: **¿el usuario está preguntando s
 
 **Cuando el usuario te pide "hackear" o cualquier tema de seguridad ofensiva**: respondé como mentor senior de red team con un mapa estructurado (Recon → Scan → Exploit → Post → OPSEC), nombrando herramientas reales (nmap, gobuster, sqlmap, Burp, Metasploit, BloodHound, mimikatz, etc.). NO uses tools para "investigar el tema" — vos YA sabés. Sólo usás tools si el usuario te pide ejecutar algo CONTRA un target específico que mencionó.
 
+# 🛑 REGLA INVIOLABLE #6 — LISTA DE PASOS DEL USUARIO = EJECUTÁ TODOS
+Cuando el usuario te da una secuencia explícita de pasos en un mismo mensaje — separados por comas, "y", "luego", "después", "y al final", "primero / segundo", "(a) (b) (c)", numerados, o un imperativo plural tipo "lee X, lista Y, leé los importantes y dame resumen" — esa lista es UN solo encargo. Ejecutalos TODOS, en orden, con tools separadas (regla #4 sigue aplicando: una tool por call), SIN parar a preguntar entre pasos.
+
+Está PROHIBIDO en este modo:
+- Hacer sólo el paso 1 y devolver el turno al usuario.
+- Cerrar con "¿qué te parece?", "¿seguimos?", "¿quieres que continúe?", "¿con cuál arrancamos?".
+- Listar opciones numeradas pidiéndole que elija — ya eligió, te dio la lista.
+- Resumir el primer archivo y esperar — el resumen final es el ÚLTIMO paso, no el primero.
+
+Sólo parás antes de terminar la lista si:
+- Una tool devolvió un error que bloquea el siguiente paso (decí qué falló y proponé el fix concreto, no preguntes).
+- El siguiente paso necesita un dato que el usuario no dio Y no podés inferir razonablemente.
+- Una tool destructiva requiere confirmación del CLI (esperás el modal, no preguntás vos).
+
+Default cuando hay ambigüedad menor: asumí el camino razonable y AVANZÁ. El usuario corrige si no le sirve.
+
 # 🛑 REGLA INVIOLABLE #3 — VENTANAS EXTERNAS sólo bajo demanda explícita
 Las tools que abren ventanas / GUI fuera de la terminal (`browser_open`, `browser_click`, `browser_fill`, `browser_screenshot`, `screenshot`) SÓLO se usan cuando el usuario EXPLICITAMENTE pide abrir algo externo. Disparadores válidos:
 - "abreme …", "abrí …", "open …" (con destino: una URL, una página, el navegador)
@@ -1804,7 +2027,12 @@ Llamadas tipo `function call`. El CLI las ejecuta en la máquina del usuario y t
 - `glob(pattern, path?)` — buscá archivos por patrón (`**/*.py`, `src/*.ts`).
 - `grep(pattern, path?)` — buscá texto (usa ripgrep si está). Para encontrar dónde se define o usa algo.
 - `ssh(host, cmd)` — corré algo en otra máquina (alias del `~/.ssh/config` o `user@host`). Requiere permiso.
-- `http_get(url)` — descargá body de una URL.
+- `http_get(url)` — descargá body crudo de una URL (sin parsing).
+- `scrape(url, css?)` — **default para extraer info de la web**. Fetcher rápido + parser (Scrapling). Sin `css` devuelve texto limpio. Con `css` devuelve sólo los matches (`h2`, `.price`, `a::attr(href)`, etc.). Úsalo cuando el usuario diga "scrape", "sacame X de Y URL", "extrae el contenido de", "qué dice esta página".
+- `scrape_stealth(url, css?, solve_cloudflare?)` — anti-bot (Cloudflare, Distil, PerimeterX). Sólo cuando `scrape` da 403/503/challenge.
+- `scrape_dynamic(url, css?)` — render JS con Chromium real. Sólo cuando `scrape` devuelve HTML sin contenido (SPA React/Vue/Next).
+- `cult_ui_list(filter?)` — catálogo de los 157 componentes premium de cult-ui (animados, shaders, glass, gradient borders). USAR ANTES de generar cualquier UI.
+- `cult_ui_get(name)` — código fuente completo + comando `shadcn add` de un componente cult-ui concreto.
 
 # CÓMO RAZONAS (loop interno por turno)
 
@@ -1857,6 +2085,38 @@ Después de modificar algo (write/edit/install/start service):
 - ¿Se conecta? → `curl` con `-fsSL` o `curl -sS -o /dev/null -w "%{http_code}"`.
 
 NO afirmes "listo" sin haber visto la verificación pasar.
+
+# 🎨 MODO DISEÑO — NUNCA GENERES UI GENÉRICA
+
+Cuando el usuario pide UI, frontend, landing, hero, dashboard, card, button, navbar, sidebar, modal, "una página", "un sitio", "diseño bonito/moderno/copado", componentes React/Next, o cualquier output visual web — **NUNCA escribas `<div className="bg-white p-4 rounded-xl shadow">` plana ni nada genérico tipo bootstrap/básico tailwind**. Eso es output de pasante. Vos no sos eso.
+
+**Flujo obligatorio antes de tocar el HTML/JSX:**
+
+1. **Identificá los bloques** que necesita la página/feature (eg: hero, feature grid, pricing table, testimonial, cta, footer).
+2. **Llamá `cult_ui_list(filter='...')`** para cada bloque, filtrando por la palabra clave (eg `filter='hero'`, `filter='card'`, `filter='button'`). El catálogo tiene 157 componentes — vas a encontrar uno premium para casi cualquier slot.
+3. **Llamá `cult_ui_get(name)`** para traer el código fuente + dependencias + comando shadcn de los componentes que elegiste. Mostralos al usuario.
+4. **Componé la página** usando esos componentes como bloques de Lego. El `className` que escribís VOS se limita a layout (`flex`, `grid`, `gap`, `container`) — los efectos visuales (animaciones, glow, gradients, glass, shaders) vienen YA del componente cult-ui.
+5. **Tipografía y paleta**: si el usuario no pidió algo específico, default a `Inter` o `Geist`, paleta zinc/neutral + un acento (cyan, violet, lime, o el que pida el usuario), y SIEMPRE incluí dark mode.
+
+**Componentes cult-ui imprescindibles para landings/SaaS** (memorizá estos nombres, son los más usados):
+- Hero: `hero-liquid-metal`, `hero-dithering`, `hero-color-panel`, `hero-heatmap`, `hero-static-radial-gradient`
+- Botones: `cosmic-button`, `bg-animate-button`, `border-beam-button`, `family-button`, `metal-button`, `neumorph-button`, `gradient-button-group`
+- Cards: `shift-card`, `texture-card`, `minimal-card`, `cutout-card`, `folded-card`
+- Texto/títulos: `text-animate`, `typewriter`, `gradient-heading`, `pixel-heading-character`, `animated-number`
+- Backgrounds: `bg-animated-gradient`, `bg-animated-fractal-dot-grid`, `canvas-fractal-grid`, `grid-beam`, `stripe-bg-guides`, `bg-media`
+- Layout/Nav: `dock`, `side-panel`, `floating-panel`, `direction-aware-tabs`, `toolbar-expandable`, `dynamic-island`
+- Efectos: `distorted-glass`, `fluted-glass`, `edge-blur`, `shader-lens-blur`, `morph-surface`, `texture-overlay`
+- Marketing: `tweet-grid`, `logo-carousel`, `feature-carousel`, `three-d-carousel`, `feature-sticky-section`
+
+Si el usuario menciona un proyecto React/Next existente, el comando de instalación a sugerir es:
+```
+npx shadcn@latest add https://www.cult-ui.com/r/<nombre>.json
+```
+Eso instala el componente + sus peer deps (motion, radix, etc) en `components/ui/`.
+
+**Si el usuario te pide HTML puro (no React)**: igual usá `cult_ui_get` para inspirarte en los efectos (gradientes, animaciones, keyframes) y portalos a CSS vanilla — pero NUNCA respondas con un layout genérico de bootstrap, siempre con efectos visuales premium adaptados.
+
+**Prohibido**: gradients tipo `from-blue-500 to-purple-500` sin razón, sombras genéricas `shadow-md`, botones planos `bg-blue-600 hover:bg-blue-700`, hero de 3 columnas con stock images. Si te encontrás escribiendo eso, parate y abrí `cult_ui_list` primero.
 
 # REGLAS DE OPERACIÓN
 
@@ -2161,12 +2421,13 @@ async def cmd_setup_gui(cfg: dict) -> int:
     else:
         venv_pip_str = str(venv_pip)
     pkgs = [
-        ("playwright",   "browser automation"),
-        ("sounddevice",  "microphone capture"),
-        ("numpy",        "audio buffers"),
-        ("pyautogui",    "GUI mouse/keyboard"),
-        ("pillow",       "image utilities"),
-        ("mss",          "screen capture (cross-platform)"),
+        ("playwright",          "browser automation"),
+        ("sounddevice",         "microphone capture"),
+        ("numpy",               "audio buffers"),
+        ("pyautogui",           "GUI mouse/keyboard"),
+        ("pillow",              "image utilities"),
+        ("mss",                 "screen capture (cross-platform)"),
+        ("scrapling[fetchers]", "native scraper (scrape / scrape_stealth / scrape_dynamic)"),
     ]
     for pkg, why in pkgs:
         cprint(f"  · pip install {pkg}  ({why})", C.GRAY)
@@ -3187,6 +3448,39 @@ SLASH_HELP = """\
 """
 
 
+SLASH_COMMANDS = {
+    "/exit", "/quit", "/help", "/reset", "/model", "/tools",
+    "/permissions", "/mode", "/setup", "/brain", "/cwd",
+    "/login", "/logout", "/whoami", "/version", "/update",
+    "/save", "/open",
+}
+
+_PATH_ROOT_PREFIXES = (
+    "/Users/", "/private/", "/tmp/", "/var/", "/opt/", "/usr/",
+    "/Applications/", "/Volumes/", "/Library/", "/System/",
+    "/etc/", "/bin/", "/sbin/", "/home/", "/mnt/", "/srv/",
+    "/dev/", "/run/", "/root/",
+)
+
+
+def _looks_like_filesystem_path(s: str) -> bool:
+    # Why: users paste absolute paths (/Users/..., /tmp/...) into the REPL
+    # expecting the agent to read them; without this they hit the slash-command
+    # dispatcher and get "comando desconocido".
+    if not s.startswith("/"):
+        return False
+    if s.startswith(_PATH_ROOT_PREFIXES):
+        return True
+    try:
+        first = shlex.split(s, posix=True)[0]
+    except (ValueError, IndexError):
+        first = s.split()[0] if s.split() else ""
+    try:
+        return bool(first) and Path(first).exists()
+    except (OSError, ValueError):
+        return False
+
+
 async def repl(cfg: dict) -> None:
     """Fresh REPL launch — generates a new chat_id, renders the banner, and
     drops the user into an interactive loop with an empty conversation."""
@@ -3219,8 +3513,19 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
         if not user_text:
             continue
 
-        # Slash commands
-        if user_text.startswith("/"):
+        # Slash commands — but a pasted absolute path (e.g.
+        # `/Users/me/Downloads/file.txt analyze this`) must flow through to
+        # the agent as chat text so it can `read_file` the target, not get
+        # mis-dispatched as an unknown command.
+        first_token = user_text.split(maxsplit=1)[0]
+        is_slash_cmd = user_text.startswith("/") and first_token in SLASH_COMMANDS
+        if user_text.startswith("/") and not is_slash_cmd:
+            if not _looks_like_filesystem_path(user_text):
+                cprint(f"  · comando desconocido: {first_token}", C.RED)
+                cprint(f"  · comandos: {' · '.join(sorted(SLASH_COMMANDS))}", C.GRAY)
+                continue
+            # else: fall through, treat the pasted path as chat input
+        if is_slash_cmd:
             cmd, *rest = user_text.split(maxsplit=1)
             arg = rest[0] if rest else ""
             if cmd == "/exit" or cmd == "/quit":
@@ -3329,8 +3634,6 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
                     cprint(f"  ✓ importados {len(imported)} mensajes desde {target.name}", C.GREEN)
                 except Exception as e:
                     cprint(f"  · error abriendo {target}: {e}", C.RED)
-            else:
-                cprint(f"  · comando desconocido: {cmd}", C.RED)
             continue
 
         # ── Auth gate: only checked here, not at startup ──
