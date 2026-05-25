@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LOUD · Aprobar sesión CLI</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+:root{
+  --bg:#0a0a0a; --panel:#13131a; --border:rgba(255,255,255,0.08); --border-strong:rgba(255,255,255,0.14);
+  --fg:#ececec; --muted:rgba(255,255,255,0.55); --dim:rgba(255,255,255,0.38);
+  --accent:#a2cd65; --accent-dark:#86b04d; --accent-glow:rgba(162,205,101,0.25); --red:#f87171; --yellow:#fbbf24;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;height:100%}
+body{position:relative;overflow-x:hidden;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+body::before{
+  content:"";position:fixed;inset:-10vmax;z-index:-2;pointer-events:none;
+  background:
+    radial-gradient(ellipse 55vmax 45vmax at 18% 22%, rgba(162,205,101,0.055), transparent 62%),
+    radial-gradient(ellipse 50vmax 38vmax at 82% 78%, rgba(82,158,200,0.045), transparent 65%),
+    linear-gradient(180deg, #08080b 0%, #050608 100%);
+}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:32px 30px;max-width:480px;width:100%;box-shadow:0 20px 60px -20px rgba(0,0,0,0.7)}
+.logo{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-weight:800;font-size:13px;line-height:1.55;color:var(--accent);white-space:pre;letter-spacing:1px;text-align:center;text-shadow:0 0 20px rgba(162,205,101,0.25);margin-bottom:22px}
+h1{margin:0 0 8px;font-size:21px;font-weight:700;text-align:center;letter-spacing:-0.01em}
+.sub{color:var(--muted);font-size:13.5px;text-align:center;margin-bottom:24px;line-height:1.6}
+.code-row{background:#000;border:1px solid rgba(162,205,101,0.32);border-radius:11px;padding:18px;text-align:center;margin-bottom:20px}
+.code-label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;font-weight:600}
+.code-val{font-family:ui-monospace,Menlo,monospace;font-size:24px;font-weight:700;color:var(--accent);letter-spacing:0.18em}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:18px 0;font-size:13px}
+.kv .k{color:var(--muted)}
+.kv .v{color:var(--fg)}
+.btn{width:100%;padding:13px;background:var(--accent);color:#0a0a0a;border:none;border-radius:9px;font-weight:700;font-size:14px;cursor:pointer;transition:filter 150ms,transform 80ms;letter-spacing:0.02em;margin-top:6px}
+.btn:hover{filter:brightness(1.08)}
+.btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
+.btn-secondary{background:transparent;color:var(--muted);border:1px solid var(--border);margin-top:8px}
+.btn-secondary:hover{color:var(--fg);border-color:var(--border-strong)}
+.alert{padding:11px 14px;border-radius:9px;font-size:13px;margin-bottom:14px;line-height:1.55}
+.alert.warn{background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.3);color:var(--yellow)}
+.alert.ok{background:rgba(162,205,101,0.08);border:1px solid rgba(162,205,101,0.3);color:var(--accent)}
+.alert.err{background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);color:var(--red)}
+.footer{text-align:center;font-size:11px;color:var(--dim);margin-top:18px}
+.footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="card">
+
+<pre class="logo">██╗      ██████╗ ██╗   ██╗██████╗
+██║     ██╔═══██╗██║   ██║██╔══██╗
+██║     ██║   ██║██║   ██║██║  ██║
+██║     ██║   ██║██║   ██║██║  ██║
+███████╗╚██████╔╝╚██████╔╝██████╔╝
+╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝</pre>
+
+<h1>Aprobar sesión CLI</h1>
+<p class="sub">El CLI de LOUD pidió permiso para iniciar sesión.<br>Confirma que el código abajo es el mismo que ves en tu terminal.</p>
+
+<div class="code-row">
+  <div class="code-label">Verification code</div>
+  <div class="code-val" id="code-val">…</div>
+</div>
+
+<div id="auth-state-checking" style="display:none">
+  <div class="alert warn">Verificando tu sesión de LOUD…</div>
+</div>
+
+<div id="auth-state-need-login" style="display:none">
+  <div class="alert warn">Necesitas iniciar sesión en LOUD primero.</div>
+  <a href="/" class="btn" style="display:block;text-decoration:none;text-align:center">Ir a iniciar sesión</a>
+  <p class="footer">Vuelve a esta página cuando hayas entrado</p>
+</div>
+
+<div id="auth-state-ready" style="display:none">
+  <div class="kv">
+    <span class="k">Usuario</span><span class="v" id="who">—</span>
+    <span class="k">Rol</span><span class="v" id="role">—</span>
+    <span class="k">Aplicación</span><span class="v">LOUD CLI (terminal)</span>
+    <span class="k">Acceso</span><span class="v">acceso completo a la API (mismos permisos del web)</span>
+  </div>
+  <button class="btn" id="btn-approve">Aprobar y entrar</button>
+  <button class="btn btn-secondary" id="btn-deny">No fui yo · cancelar</button>
+</div>
+
+<div id="auth-state-done" style="display:none">
+  <div class="alert ok">✓ Aprobado. Vuelve a tu terminal — el CLI ya tiene acceso.</div>
+</div>
+
+<div id="auth-state-error" style="display:none">
+  <div class="alert err" id="err-msg">Algo falló.</div>
+  <a href="/" class="btn">Volver a la página principal</a>
+</div>
+
+<p class="footer">Si no iniciaste un login desde la terminal, cierra esta ventana y notifica al equipo.</p>
+</div>
+
+<script>
+const API = "https://api.loud.codes";
+const params = new URLSearchParams(location.search);
+const sid  = params.get("session");
+const code = params.get("code");
+
+function $(id){ return document.getElementById(id) }
+function showState(name){
+  ["checking","need-login","ready","done","error"].forEach(s => {
+    $("auth-state-" + s).style.display = (s === name) ? "block" : "none";
+  });
+}
+function showError(msg){
+  $("err-msg").textContent = msg;
+  showState("error");
+}
+
+if (!sid || !code) {
+  showError("URL inválida — falta session o code");
+} else {
+  $("code-val").textContent = code;
+
+  // ¿Hay token de LOUD en localStorage?
+  // El frontend lo guarda como "loud.token" (la key principal)
+  const token = localStorage.getItem("loud.token");
+
+  if (!token) {
+    showState("need-login");
+  } else {
+    showState("checking");
+    fetch(API + "/v1/me", {headers: {Authorization: "Bearer " + token}})
+      .then(r => r.ok ? r.json() : Promise.reject(new Error("session expired")))
+      .then(u => {
+        $("who").textContent = u.username || u.email;
+        $("role").textContent = u.role;
+        showState("ready");
+      })
+      .catch(() => {
+        localStorage.removeItem("loud.token");
+        showState("need-login");
+      });
+  }
+}
+
+$("btn-approve").onclick = async () => {
+  const token = localStorage.getItem("loud.token");
+  if (!token) { showState("need-login"); return }
+  $("btn-approve").disabled = true;
+  $("btn-approve").textContent = "Aprobando…";
+  try {
+    const r = await fetch(API + "/v1/auth/cli/approve", {
+      method: "POST",
+      headers: {"Content-Type":"application/json", Authorization: "Bearer " + token},
+      body: JSON.stringify({session_id: sid, code}),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(()=>({detail:"failed"}));
+      showError(e.detail || "Aprobación falló");
+      return;
+    }
+    showState("done");
+  } catch (e) {
+    showError(e.message);
+  }
+};
+$("btn-deny").onclick = () => { showState("done"); $("auth-state-done").querySelector(".alert").textContent = "Sesión rechazada. Puedes cerrar esta ventana."; };
+</script>
+</body>
+</html>
