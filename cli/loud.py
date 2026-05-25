@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -1600,6 +1600,317 @@ async def tool_scrape_dynamic(url: str, css: str | None = None, max_chars: int =
         return f"ERROR: {type(e).__name__}: {e}"
 
 
+# Ecosystem manifest map — filename (or glob suffix) → list of tags it implies.
+# Used by tool_project_scan to detect what kind of project lives in a folder.
+_ECO_MANIFESTS: dict = {
+    # Node / JS / TS
+    "package.json":          ["Node", "JS"],
+    "pnpm-lock.yaml":        ["Node", "pnpm"],
+    "yarn.lock":             ["Node", "yarn"],
+    "package-lock.json":     ["Node", "npm"],
+    "bun.lock":              ["Node", "bun"],
+    "bun.lockb":             ["Node", "bun"],
+    "tsconfig.json":         ["TypeScript"],
+    "next.config.js":        ["Next.js"],
+    "next.config.ts":        ["Next.js"],
+    "next.config.mjs":       ["Next.js"],
+    "vite.config.js":        ["Vite"],
+    "vite.config.ts":        ["Vite"],
+    "astro.config.mjs":      ["Astro"],
+    "astro.config.ts":       ["Astro"],
+    "nuxt.config.ts":        ["Nuxt"],
+    "nuxt.config.js":        ["Nuxt"],
+    "svelte.config.js":      ["SvelteKit"],
+    "remix.config.js":       ["Remix"],
+    "angular.json":          ["Angular"],
+    "tailwind.config.js":    ["Tailwind"],
+    "tailwind.config.ts":    ["Tailwind"],
+    "postcss.config.js":     ["PostCSS"],
+    "components.json":       ["shadcn/ui"],
+    "turbo.json":            ["Turborepo (monorepo)"],
+    "nx.json":               ["Nx (monorepo)"],
+    "lerna.json":            ["Lerna (monorepo)"],
+    "pnpm-workspace.yaml":   ["pnpm monorepo"],
+    "deno.json":             ["Deno"],
+    "deno.jsonc":            ["Deno"],
+    # Python
+    "pyproject.toml":        ["Python"],
+    "requirements.txt":      ["Python"],
+    "requirements-dev.txt":  ["Python"],
+    "Pipfile":               ["Python", "pipenv"],
+    "Pipfile.lock":          ["Python", "pipenv"],
+    "poetry.lock":           ["Python", "poetry"],
+    "uv.lock":               ["Python", "uv"],
+    "setup.py":              ["Python"],
+    "setup.cfg":             ["Python"],
+    "environment.yml":       ["Python", "conda"],
+    "manage.py":             ["Django"],
+    # Rust
+    "Cargo.toml":            ["Rust"],
+    "Cargo.lock":            ["Rust"],
+    # Go
+    "go.mod":                ["Go"],
+    "go.sum":                ["Go"],
+    "go.work":               ["Go (workspace)"],
+    # Ruby
+    "Gemfile":               ["Ruby"],
+    "Gemfile.lock":          ["Ruby"],
+    "Rakefile":              ["Ruby"],
+    "config.ru":             ["Ruby (Rack)"],
+    # PHP
+    "composer.json":         ["PHP"],
+    "composer.lock":         ["PHP"],
+    "artisan":               ["Laravel"],
+    # Java / Kotlin / JVM
+    "pom.xml":               ["Java", "Maven"],
+    "build.gradle":          ["JVM", "Gradle"],
+    "build.gradle.kts":      ["Kotlin/JVM", "Gradle"],
+    "settings.gradle":       ["Gradle"],
+    "settings.gradle.kts":   ["Gradle"],
+    # Swift / Apple
+    "Package.swift":         ["Swift (SPM)"],
+    "Podfile":               ["Swift/ObjC", "CocoaPods"],
+    # C# / .NET
+    "global.json":           [".NET"],
+    "Directory.Build.props": [".NET"],
+    # Elixir
+    "mix.exs":               ["Elixir"],
+    "mix.lock":              ["Elixir"],
+    # Haskell
+    "stack.yaml":            ["Haskell (Stack)"],
+    "package.yaml":          ["Haskell (hpack)"],
+    # Dart / Flutter
+    "pubspec.yaml":          ["Dart/Flutter"],
+    "pubspec.lock":          ["Dart/Flutter"],
+    # C / C++
+    "CMakeLists.txt":        ["C/C++ (CMake)"],
+    "Makefile":              ["Make"],
+    "conanfile.txt":         ["C/C++ (Conan)"],
+    "vcpkg.json":            ["C/C++ (vcpkg)"],
+    "meson.build":           ["C/C++ (Meson)"],
+    # Zig / Nim / Crystal / Lua / Julia / R / OCaml
+    "build.zig":             ["Zig"],
+    "nimble":                ["Nim"],
+    "shard.yml":             ["Crystal"],
+    ".luarc.json":           ["Lua"],
+    "Project.toml":          ["Julia"],
+    "DESCRIPTION":           ["R"],
+    "dune-project":          ["OCaml (Dune)"],
+    # Nix
+    "flake.nix":             ["Nix"],
+    "default.nix":           ["Nix"],
+    "shell.nix":             ["Nix"],
+    # Containers / infra
+    "Dockerfile":            ["Docker"],
+    "Containerfile":         ["Container"],
+    "docker-compose.yml":    ["Docker Compose"],
+    "docker-compose.yaml":   ["Docker Compose"],
+    "compose.yml":           ["Docker Compose"],
+    "compose.yaml":          ["Docker Compose"],
+    # IaC
+    "main.tf":               ["Terraform"],
+    "Pulumi.yaml":           ["Pulumi"],
+    "serverless.yml":        ["Serverless"],
+    "vercel.json":           ["Vercel"],
+    "netlify.toml":          ["Netlify"],
+    "fly.toml":              ["Fly.io"],
+    "railway.toml":          ["Railway"],
+    "wrangler.toml":         ["Cloudflare Workers"],
+    # Data / ML
+    "dvc.yaml":              ["DVC (ML)"],
+    "mlproject":             ["MLflow"],
+    # Mobile / cross
+    "Cartfile":              ["Carthage (Apple)"],
+    # Agents / Editors
+    "CLAUDE.md":             ["Claude-Code-aware"],
+    "AGENTS.md":             ["Agent-aware"],
+    ".cursorrules":          ["Cursor-aware"],
+    # Generic
+    "Makefile.lock":         ["Make"],
+}
+
+
+def _scan_dir(root: Path, max_depth: int = 2) -> tuple[dict, list, dict]:
+    """Walk `root` up to `max_depth`. Returns (manifests, docs, ext_counts).
+    - manifests: {rel_path: [tags]}  — files that fingerprint an ecosystem
+    - docs:      [rel_path]          — *.md / *.rst / *.txt docs worth reading
+    - ext_counts: {ext: count}       — language-extension census for fallback
+    """
+    manifests: dict = {}
+    docs: list = []
+    ext_counts: dict = {}
+    skip = {"node_modules", ".git", "dist", "build", ".next", ".turbo", ".venv", "venv",
+            "__pycache__", "target", "vendor", ".gradle", ".idea", ".vscode", "out",
+            ".terraform", "DerivedData", ".cache", ".pnpm-store", ".yarn", ".parcel-cache",
+            ".pytest_cache", ".mypy_cache", ".ruff_cache", "coverage", ".nyc_output"}
+    code_exts = {".py", ".js", ".ts", ".tsx", ".jsx", ".rs", ".go", ".rb", ".php",
+                 ".java", ".kt", ".swift", ".cs", ".cpp", ".cc", ".c", ".h", ".hpp",
+                 ".ex", ".exs", ".erl", ".hs", ".ml", ".nim", ".cr", ".zig", ".jl",
+                 ".r", ".lua", ".dart", ".scala", ".clj", ".cljs", ".elm", ".vue",
+                 ".svelte", ".astro", ".sh", ".bash", ".zsh", ".ps1", ".fish"}
+    root = root.resolve()
+    for entry in root.rglob("*"):
+        try:
+            rel_parts = entry.relative_to(root).parts
+        except ValueError:
+            continue
+        if len(rel_parts) > max_depth:
+            continue
+        if any(part in skip or part.startswith(".git") for part in rel_parts):
+            continue
+        if not entry.is_file():
+            continue
+        rel = str(entry.relative_to(root))
+        name = entry.name
+        # — manifest match (exact, then suffix) —
+        if name in _ECO_MANIFESTS:
+            manifests[rel] = _ECO_MANIFESTS[name]
+        elif name.endswith(".csproj") or name.endswith(".fsproj") or name.endswith(".vbproj"):
+            manifests[rel] = [".NET"]
+        elif name.endswith(".sln"):
+            manifests[rel] = [".NET solution"]
+        elif name.endswith(".gemspec"):
+            manifests[rel] = ["Ruby gem"]
+        elif name.endswith(".xcodeproj") or name.endswith(".xcworkspace"):
+            manifests[rel] = ["Xcode"]
+        elif name.endswith(".cabal"):
+            manifests[rel] = ["Haskell (Cabal)"]
+        elif name.endswith(".nimble"):
+            manifests[rel] = ["Nim"]
+        elif name.endswith(".rockspec"):
+            manifests[rel] = ["Lua"]
+        elif name.endswith(".Rproj"):
+            manifests[rel] = ["R"]
+        elif name.endswith(".tf") or name.endswith(".tfvars"):
+            manifests[rel] = ["Terraform"]
+        elif name.endswith(".bicep"):
+            manifests[rel] = ["Bicep (Azure)"]
+        # — docs harvest (*.md, *.rst, *.txt at relevant depths) —
+        lower = name.lower()
+        if name.endswith((".md", ".mdx", ".rst")) or lower in ("readme", "license", "notice", "changelog", "agents", "claude"):
+            docs.append(rel)
+        # — extension census for fallback —
+        suffix = entry.suffix.lower()
+        if suffix in code_exts:
+            ext_counts[suffix] = ext_counts.get(suffix, 0) + 1
+    return manifests, docs, ext_counts
+
+
+async def tool_project_scan(path: str = ".", max_depth: int = 2) -> str:
+    """Detect what KIND of project lives in `path`: languages, frameworks,
+    build tools, monorepo flavor, container/infra, etc. Also harvests *.md
+    docs (README, INSTRUCTIONS, CHANGELOG, AGENTS.md, CLAUDE.md, etc) so the
+    agent reads the project's own instructions before doing anything.
+
+    Use BEFORE deciding which files to read when the user asks 'analizá esta
+    carpeta' / 'qué es este proyecto' / 'scaneá esto'.
+    """
+    p = Path(_norm_path(path)).expanduser().resolve()
+    if not p.exists():
+        return f"ERROR: not found: {p}"
+    if p.is_file():
+        p = p.parent
+    try:
+        manifests, docs, ext_counts = _scan_dir(p, max_depth=max_depth)
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+    lines = [f"[{p}]"]
+    # — Ecosystem fingerprint —
+    if manifests:
+        tag_counts: dict[str, int] = {}
+        for tags in manifests.values():
+            for t in tags:
+                tag_counts[t] = tag_counts.get(t, 0) + 1
+        top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])
+        lines.append("")
+        lines.append("## Ecosystem fingerprint")
+        lines.append("  " + " · ".join(f"{t} ({c})" for t, c in top_tags))
+        lines.append("")
+        lines.append("## Manifests found")
+        for rel, tags in sorted(manifests.items()):
+            lines.append(f"  {rel:42}  → {', '.join(tags)}")
+    elif ext_counts:
+        # No manifests — fall back to extension census
+        EXT_LANG = {".py": "Python", ".js": "JS", ".ts": "TS", ".tsx": "TS/React",
+                    ".jsx": "JS/React", ".rs": "Rust", ".go": "Go", ".rb": "Ruby",
+                    ".php": "PHP", ".java": "Java", ".kt": "Kotlin", ".swift": "Swift",
+                    ".cs": "C#", ".cpp": "C++", ".c": "C", ".ex": "Elixir", ".exs": "Elixir",
+                    ".hs": "Haskell", ".nim": "Nim", ".cr": "Crystal", ".zig": "Zig",
+                    ".jl": "Julia", ".lua": "Lua", ".dart": "Dart", ".vue": "Vue",
+                    ".svelte": "Svelte", ".astro": "Astro", ".sh": "shell", ".ps1": "PowerShell"}
+        top_exts = sorted(ext_counts.items(), key=lambda x: -x[1])[:8]
+        lines.append("")
+        lines.append("## No manifests · extension census (fallback)")
+        lines.append("  " + " · ".join(f"{EXT_LANG.get(e, e)} ({c})" for e, c in top_exts))
+    else:
+        lines.append("")
+        lines.append("(no manifests and no source code at depth ≤ {}; likely docs-only or empty)".format(max_depth))
+
+    # — Docs / instructions —
+    if docs:
+        lines.append("")
+        lines.append("## Docs & instructions (read these too)")
+        # Sort so root-level + named docs come first
+        priority_doc_names = ("README", "AGENTS", "CLAUDE", "CONTINUE", "ARCHITECTURE",
+                              "CONTRIBUTING", "RUNBOOK", "INSTRUCTIONS", "SETUP",
+                              "USAGE", "CHANGELOG", "RECOVERY", "SESSION", "TOOLS",
+                              "API", "DEPLOY", "ENV")
+        def doc_rank(rel: str) -> tuple:
+            n = Path(rel).name.upper()
+            stem = Path(rel).stem.upper()
+            depth = rel.count("/")
+            pri = next((i for i, p in enumerate(priority_doc_names) if stem.startswith(p)), 99)
+            return (depth, pri, n)
+        for rel in sorted(docs, key=doc_rank)[:15]:
+            lines.append(f"  {rel}")
+        if len(docs) > 15:
+            lines.append(f"  [... {len(docs) - 15} more *.md/.rst]")
+
+    # — Suggested reads (manifests + top docs + entrypoints) —
+    suggestions: list[str] = []
+    seen: set = set()
+    def add(rel: str):
+        if rel not in seen:
+            suggestions.append(rel)
+            seen.add(rel)
+    # READMEs first
+    for readme in ("README.md", "README.rst", "README"):
+        if (p / readme).exists():
+            add(readme); break
+    # Agent-aware files
+    for af in ("AGENTS.md", "CLAUDE.md", "CONTINUE.md", "INSTRUCTIONS.md", ".cursorrules"):
+        if (p / af).exists():
+            add(af)
+    # Diagnostic manifests
+    priority_manifests = [
+        "package.json", "pyproject.toml", "requirements.txt", "Cargo.toml",
+        "go.mod", "Gemfile", "composer.json", "pom.xml", "build.gradle",
+        "build.gradle.kts", "mix.exs", "Package.swift", "pubspec.yaml",
+        "Dockerfile", "compose.yaml", "docker-compose.yml", "CMakeLists.txt",
+        "next.config.ts", "next.config.js", "vite.config.ts", "astro.config.mjs",
+        "tailwind.config.ts", "tailwind.config.js", "main.tf",
+    ]
+    for f in priority_manifests:
+        for rel in manifests:
+            if rel.endswith(f):
+                add(rel); break
+    # Common entry files
+    for entry in ("src/index.ts", "src/index.tsx", "src/main.ts", "src/main.tsx",
+                  "src/main.rs", "src/lib.rs", "main.go", "cmd/main.go",
+                  "app/main.py", "app.py", "manage.py", "main.py", "index.js",
+                  "server.js", "app.js", "src/index.js", "lib/main.rb"):
+        if (p / entry).exists():
+            add(entry)
+    if suggestions:
+        lines.append("")
+        lines.append("## Suggested reads (in order)")
+        for s in suggestions[:10]:
+            lines.append(f"  read_file('{p / s}')")
+
+    return "\n".join(lines)
+
+
 _CULT_UI_REGISTRY = "https://www.cult-ui.com/r/registry.json"
 _CULT_UI_COMPONENT = "https://www.cult-ui.com/r/{name}.json"
 _cult_ui_cache: dict = {}
@@ -1763,6 +2074,14 @@ TOOLS_SCHEMA = [
         }, "required": ["url"]},
     }},
     {"type": "function", "function": {
+        "name": "project_scan",
+        "description": "Detect QUÉ TIPO de proyecto vive en un folder: lenguajes, frameworks, build tools, monorepo, container/infra. Reconoce 80+ manifests (package.json, pyproject.toml, Cargo.toml, go.mod, Gemfile, composer.json, pom.xml, build.gradle, Package.swift, pubspec.yaml, Dockerfile, next.config, vite.config, tailwind.config, terraform main.tf, etc). Devuelve fingerprint del ecosistema + lista de manifests encontrados + 6-8 reads sugeridos en orden. USAR PRIMERO cuando el usuario pida 'analizá esta carpeta', 'qué es este proyecto', 'scaneá esto', 'describime este folder', 'qué tengo acá'.",
+        "parameters": {"type": "object", "properties": {
+            "path":      {"type": "string", "description": "Carpeta a analizar (default `.`)."},
+            "max_depth": {"type": "integer", "description": "Profundidad máx de search (default 2, sube a 3 si es monorepo)."}
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "cult_ui_list",
         "description": "Lista los 157+ componentes de cult-ui (biblioteca de UI premium con animaciones, shaders, glass, gradient borders, dynamic island, etc — todo Tailwind+Motion+TS). Úsala ANTES de generar cualquier UI/landing/dashboard/hero/card/button. Pasa `filter` para buscar (eg 'hero', 'button', 'card', 'animated', 'glass'). El resultado te da nombre + descripción 1-línea de cada componente. Es la mejor forma de NO tirar diseño genérico.",
         "parameters": {"type": "object", "properties": {
@@ -1902,6 +2221,7 @@ TOOL_FNS = {
     "grep":               tool_grep,
     "ls":                 tool_ls,
     "http_get":           tool_http_get,
+    "project_scan":       tool_project_scan,
     "scrape":             tool_scrape,
     "scrape_stealth":     tool_scrape_stealth,
     "scrape_dynamic":     tool_scrape_dynamic,
@@ -2033,6 +2353,7 @@ Llamadas tipo `function call`. El CLI las ejecuta en la máquina del usuario y t
 - `scrape_dynamic(url, css?)` — render JS con Chromium real. Sólo cuando `scrape` devuelve HTML sin contenido (SPA React/Vue/Next).
 - `cult_ui_list(filter?)` — catálogo de los 157 componentes premium de cult-ui (animados, shaders, glass, gradient borders). USAR ANTES de generar cualquier UI.
 - `cult_ui_get(name)` — código fuente completo + comando `shadcn add` de un componente cult-ui concreto.
+- `project_scan(path, max_depth?)` — detecta el ecosistema de un folder (Node/Python/Rust/Go/Java/PHP/Ruby/Swift/Elixir/Flutter/.NET/Haskell/Nim/Crystal/Zig/Julia/R/OCaml/Lua/Deno/Bun + frameworks + Docker/Terraform/Vercel/CF Workers/etc). USAR PRIMERO para "analizá esta carpeta".
 
 # CÓMO RAZONAS (loop interno por turno)
 
@@ -2085,6 +2406,28 @@ Después de modificar algo (write/edit/install/start service):
 - ¿Se conecta? → `curl` con `-fsSL` o `curl -sS -o /dev/null -w "%{http_code}"`.
 
 NO afirmes "listo" sin haber visto la verificación pasar.
+
+# 🔬 MODO ANÁLISIS DE PROYECTO — ECOSYSTEM-AWARE
+
+Cuando el usuario te pide "analizá esta carpeta", "qué es este proyecto", "scaneá esto", "describime este folder", "qué tengo acá", "explorá esto", "qué onda este repo" — vos NO empezás leyendo archivos al azar ni asumiendo que es Python/Node/etc. **Primero hacés `project_scan(path)`** y ESE output decide qué leés después.
+
+Flujo correcto:
+1. `project_scan(path)` → te devuelve **3 cosas**: (a) ecosystem fingerprint (Node/Python/Rust/Go/Java/PHP/Ruby/Swift/Elixir/Flutter/Dart/.NET/Haskell/Nim/Crystal/Zig/Julia/R/OCaml/Lua/Deno/Bun + Tailwind/Next/Vite/Astro/Nuxt/SvelteKit/Remix/Django/Laravel/Rails/Docker/Terraform/Pulumi/Vercel/CF Workers/etc), o un extension-census fallback si no hay manifests, (b) **harvest de docs `.md`/.rst** del folder (README, AGENTS.md, CLAUDE.md, CONTINUE.md, INSTRUCTIONS, CHANGELOG, ARCHITECTURE, RUNBOOK, etc — las "instrucciones del proyecto" que el usuario puede tener escritas), (c) 6-10 reads sugeridos en orden de prioridad.
+2. **Leés TODOS los MDs de instrucciones que aparezcan** (AGENTS.md, CLAUDE.md, INSTRUCTIONS.md, CONTINUE.md, .cursorrules) ANTES de tomar cualquier decisión — si el proyecto tiene reglas escritas, esas mandan.
+3. Leés el README.
+4. Leés los manifests que el scan sugirió (`package.json` para deps+scripts, `pyproject.toml` para deps+entry, `Cargo.toml` para crate+deps, `go.mod` para módulo+deps, etc).
+5. Si hay un entrypoint claro (`manage.py`, `app.py`, `main.go`, `main.rs`, `src/index.ts`, `cmd/main.go`), leés el principal.
+6. Recién entonces das el resumen ejecutivo: **qué es, qué hace, qué stack, qué deps notables, cómo se corre, qué tests, cómo se deploya** + cualquier regla o convención que sacaste de los MDs.
+
+Reglas:
+- NUNCA asumas el lenguaje. Si `project_scan` dice "Go" no busques `requirements.txt`. Si dice "Node+TypeScript+Next.js" no abras `Cargo.toml`.
+- Si `project_scan` devuelve manifests de MÚLTIPLES ecosistemas (eg Go + Node), es probable monorepo o proyecto mixto — mencionalo y explorá cada parte.
+- Si el scan devuelve "no manifests · extension census" → no es un proyecto de código standard, pero igual tiene código. Usá el census + los MDs cosechados para entender qué es.
+- Si el usuario tiene `AGENTS.md`, `CLAUDE.md`, o `.cursorrules` en el folder, esas son sus instrucciones para vos. Respetalas. Si entran en conflicto con algo de tu prompt sistema interno, las del usuario ganan SALVO para identidad LOUD y las reglas inviolables #1-#6.
+- Para monorepos (turbo.json, nx.json, pnpm-workspace.yaml, Cargo workspace, Go workspace), después del scan corré `project_scan(path/apps)` y `project_scan(path/packages)` para mapear cada sub-proyecto.
+- En proyectos containerizados (Dockerfile + compose), mencioná los servicios + puertos expuestos antes que la lógica de cada lenguaje.
+
+Output que el usuario espera del análisis: 4-8 líneas con la chapa del proyecto + stack + cómo correrlo + qué hay raro o interesante. NO una novela. Si querés detalle pedíselo al usuario o ofrecé "querés que profundice en X".
 
 # 🎨 MODO DISEÑO — NUNCA GENERES UI GENÉRICA
 
