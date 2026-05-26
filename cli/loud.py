@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 
 # ───────────────────── Config ─────────────────────
 
@@ -3662,7 +3662,34 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
         finally:
             await spinner.stop()
 
-        # End of stream. If the assistant emitted any text, the turn is done.
+        # End of stream. If the assistant emitted text AND tools, the turn is done.
+        # If the assistant emitted text BUT no tool — check if the text is just
+        # an announcement of a plan ("voy a...", "primero...", "luego..."). If
+        # so, force a continuation: append the announce as the assistant turn
+        # and re-prompt with "ya anunciaste, ahora ejecutá la primera tool".
+        # This unsticks small models (qwen 7b) that say what they'll do and stop.
+        if full_text and not had_tool_call:
+            t = full_text.strip().lower()
+            announce_markers = (
+                "voy a ", "voy a crear", "voy a hacer", "voy a arrancar",
+                "primero,", "primero voy", "después", "luego ",
+                "procedo a ", "procedo a crear", "vamos a ",
+                "comencemos", "empezamos", "comenzaré",
+            )
+            looks_like_plan = any(m in t for m in announce_markers)
+            forced_nudges = sum(1 for m in messages if m.get("role") == "system" and m.get("_force_exec"))
+            if looks_like_plan and forced_nudges < 2:
+                messages.append({"role": "assistant", "content": full_text})
+                messages.append({
+                    "role": "system",
+                    "_force_exec": True,
+                    "content": "Acabás de anunciar un plan SIN llamar ninguna tool. Eso viola REGLA INVIOLABLE #7. EJECUTÁ AHORA la primera tool del plan que acabás de describir. NO repitas el anuncio, llamá la tool directamente. Si el plan era 'crear index.html y luego servirlo', tu próxima acción es write_file(...) o bash_background(...) según corresponda."
+                })
+                cprint("  · ⚠ anunciaste plan sin tool — forzando ejecución", C.YELLOW, bold=True)
+                continue
+            cprint("", "")  # newline after typewriter
+            messages.append({"role": "assistant", "content": full_text})
+            return full_text
         if full_text:
             cprint("", "")  # newline after typewriter
             messages.append({"role": "assistant", "content": full_text})
