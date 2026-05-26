@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.3"
+__version__ = "1.6.5"
 
 # ───────────────────── Config ─────────────────────
 
@@ -2207,6 +2207,102 @@ TOOLS_SCHEMA = [
 ]
 
 
+def _try_parse_tool_text(text: str) -> tuple[str, dict] | None:
+    """Last-ditch parser: when a small model writes `write_file("a", "b")` as
+    plain text instead of using the function-calling protocol, extract it.
+    Returns (tool_name, args_dict) or None if no parseable call found.
+
+    Only matches when the text is *predominantly* one tool call (we allow
+    leading/trailing prose but the actual call must look like a Python-style
+    `name(...)` expression). Args are parsed via ast.literal_eval so we
+    accept strings, numbers, bools, None — but NEVER arbitrary code.
+    """
+    import ast, re
+    if not text:
+        return None
+    # Find all `tool_name(...)` candidates, prefer the LAST one (after any
+    # planning prose). Tool names are word chars, args is any until the
+    # matching `)` (we do depth-tracking instead of regex to handle nested).
+    valid_names = set(TOOL_FNS.keys())
+    # Find candidate name positions
+    candidates = []
+    for m in re.finditer(r'\b([a-z][a-z0-9_]+)\s*\(', text):
+        name = m.group(1)
+        if name not in valid_names:
+            continue
+        start = m.end() - 1  # position of opening (
+        # Walk forward tracking quotes + depth
+        depth = 0
+        in_str = None
+        i = start
+        while i < len(text):
+            ch = text[i]
+            if in_str:
+                if ch == '\\':
+                    i += 2; continue
+                if ch == in_str:
+                    in_str = None
+            else:
+                if ch in ('"', "'"):
+                    in_str = ch
+                elif ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                    if depth == 0:
+                        candidates.append((name, start, i))
+                        break
+            i += 1
+    if not candidates:
+        return None
+    # Take the LAST candidate (most likely the real action)
+    name, paren_open, paren_close = candidates[-1]
+    inner = text[paren_open + 1:paren_close].strip()
+    # Try to parse as Python literal: a tuple of args. Wrap in parens so it parses as tuple.
+    # First try keyword-args form: name1=value1, name2=value2
+    try:
+        # Easy case: pretend it's a function call and parse with ast
+        expr = f"_({inner})"
+        tree = ast.parse(expr, mode="eval")
+        call = tree.body
+        if not isinstance(call, ast.Call):
+            return None
+        args_pos = [ast.literal_eval(a) for a in call.args]
+        args_kw = {k.arg: ast.literal_eval(k.value) for k in call.keywords if k.arg}
+    except (SyntaxError, ValueError):
+        return None
+    # Map positional to the tool's parameter names — for safety, only support
+    # tools where we know the param order. For now, fall back to kw-only.
+    # Most tool names: write_file(path, content), bash(cmd), edit_file(path, old, new), etc.
+    POSITIONAL_ORDER = {
+        "bash":            ["cmd"],
+        "bash_background": ["cmd", "label"],
+        "read_file":       ["path"],
+        "write_file":      ["path", "content"],
+        "edit_file":       ["path", "old", "new"],
+        "ls":              ["path"],
+        "glob":            ["pattern", "path"],
+        "grep":            ["pattern", "path"],
+        "http_get":        ["url"],
+        "ssh":             ["host", "cmd"],
+        "ask_oracle":      ["question"],
+        "job_status":      ["label"],
+        "job_stop":        ["label"],
+        "scrape":          ["url", "css"],
+        "screenshot":      ["label"],
+        "browser_open":    ["url"],
+    }
+    final: dict = {}
+    if args_pos and name in POSITIONAL_ORDER:
+        for i, v in enumerate(args_pos):
+            if i < len(POSITIONAL_ORDER[name]):
+                final[POSITIONAL_ORDER[name][i]] = v
+    final.update(args_kw)
+    if not final and not args_pos:
+        return None
+    return name, final
+
+
 TOOL_FNS = {
     "bash":               tool_bash,
     "bash_background":    tool_bash_background,
@@ -3662,23 +3758,66 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
         finally:
             await spinner.stop()
 
-        # End of stream. If the assistant emitted text AND tools, the turn is done.
-        # If the assistant emitted text BUT no tool — check if the text is just
-        # an announcement of a plan ("voy a...", "primero...", "luego..."). If
-        # so, force a continuation: append the announce as the assistant turn
-        # and re-prompt with "ya anunciaste, ahora ejecutá la primera tool".
-        # This unsticks small models (qwen 7b) that say what they'll do and stop.
+        # End of stream. If the assistant emitted text BUT no native tool_call,
+        # try to PARSE a tool call out of the plain text. Small models often
+        # write `write_file("...")` as literal text instead of using the proper
+        # function-calling protocol. We extract + execute as a fallback.
         if full_text and not had_tool_call:
+            parsed = _try_parse_tool_text(full_text)
+            if parsed:
+                name, args = parsed
+                cprint(f"  · 🔧 detectado tool en texto plano → ejecutando: {name}", C.BRAND, bold=True)
+                messages.append({"role": "assistant", "content": full_text})
+                # Render + execute as if it were a real tool_call
+                header = _format_tool_call_header(name, args)
+                sys.stdout.write(f"\n  {C.BRAND}●{C.RESET} {C.BOLD}{header}{C.RESET}\n"); sys.stdout.flush()
+                decision = request_permission(cfg, name, args)
+                if decision == "stop":
+                    return ""
+                if decision == "deny":
+                    messages.append({"role": "tool", "content": f"ERROR: usuario denegó {name}"})
+                else:
+                    try:
+                        result = await TOOL_FNS[name](**args)
+                    except TypeError as e:
+                        result = f"ERROR: bad args for {name}: {e}"
+                    except Exception as e:
+                        result = f"ERROR: {type(e).__name__}: {e}"
+                    out = (result or "").rstrip()
+                    lines = out.split("\n") if out else ["(no output)"]
+                    for i, ln in enumerate(lines[:8]):
+                        prefix = f"     {C.GRAY}⎿  " if i == 0 else f"        "
+                        sys.stdout.write(f"{prefix}{C.GRAY}{shorten(ln, 160)}{C.RESET}\n")
+                    if len(lines) > 8:
+                        sys.stdout.write(f"        {C.GRAY}… +{len(lines)-8} líneas más{C.RESET}\n")
+                    sys.stdout.flush()
+                    messages.append({"role": "tool", "content": (result or "")[:8000]})
+                continue
+            # Not a parseable tool call. Check if it's just an announcement of a
+            # plan ("voy a...", etc.) — force the model to actually call a tool.
             t = full_text.strip().lower()
+            user_q = (user_text or "").strip().lower()
             announce_markers = (
-                "voy a ", "voy a crear", "voy a hacer", "voy a arrancar",
-                "primero,", "primero voy", "después", "luego ",
-                "procedo a ", "procedo a crear", "vamos a ",
-                "comencemos", "empezamos", "comenzaré",
+                # plan en futuro
+                "voy a ", "vamos a ", "procedo a ", "primero,", "luego ",
+                "después", "comencemos", "empezamos", "comenzaré",
+                # plan en presente ("creo el archivo y luego...")
+                "creo el ", "creo un ", "arranco ", "lanzo ", "monto ",
+                "instalo ", "ejecuto ", "construyo ", "genero ", "hago ",
+                "preparo ", "configuro ", "abro ", "corro ",
+                "i'll ", "i will ", "let me ", "first,", "next,", "then ",
             )
+            user_action_intent = any(verb in user_q for verb in (
+                "monta", "monte", "crea", "creá", "create", "lanza", "lanzá",
+                "ejecuta", "ejecutá", "corre", "corré", "instala", "instalá",
+                "genera", "generá", "arranca", "arrancá", "construye",
+                "configura", "abrime", "abre", "armá", "arma", "haz",
+                "hace", "hacé", "build", "run", "start", "spin up",
+            ))
             looks_like_plan = any(m in t for m in announce_markers)
             forced_nudges = sum(1 for m in messages if m.get("role") == "system" and m.get("_force_exec"))
-            if looks_like_plan and forced_nudges < 2:
+            # Nudge si: anuncia plan, O si el user pidió acción y el modelo solo respondió texto
+            if (looks_like_plan or user_action_intent) and forced_nudges < 3:
                 messages.append({"role": "assistant", "content": full_text})
                 messages.append({
                     "role": "system",
