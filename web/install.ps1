@@ -22,12 +22,15 @@ Write-Host "                  Terminal-first AI ─ loud.codes" -ForegroundColor
 Write-Host ""
 
 # ───────────────────────── checks ─────────────────────────
-Step "Checking Python ≥ 3.10"
+Step "Checking Python >= 3.10"
 try {
-    $py = (Get-Command python3 -ErrorAction SilentlyContinue) ?? (Get-Command python -ErrorAction SilentlyContinue)
-    if (-not $py) { Bail "Python no encontrado. Instala desde python.org (3.10+)" }
+    # PowerShell 5.x compatible — no null-coalescing ?? operator.
+    $py = Get-Command python3 -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+    if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
+    if (-not $py) { Bail "Python no encontrado. Instala desde python.org (3.10+) o ejecuta: winget install Python.Python.3.12" }
     $version = & $py.Source --version 2>&1
-    if ($version -notmatch "Python (\d+)\.(\d+)") { Bail "no se pudo detectar versión de Python" }
+    if ($version -notmatch "Python (\d+)\.(\d+)") { Bail "no se pudo detectar version de Python" }
     $major = [int]$Matches[1]; $minor = [int]$Matches[2]
     if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 10)) {
         Bail "Python $version es muy viejo, necesitas 3.10+"
