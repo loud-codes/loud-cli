@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.6"
+__version__ = "1.6.7"
 
 # ───────────────────── Config ─────────────────────
 
@@ -2207,6 +2207,41 @@ TOOLS_SCHEMA = [
 ]
 
 
+def _is_garbage_output(text: str) -> bool:
+    """Detect when the small model hallucinated random training-data tokens
+    instead of responding to the prompt. Symptoms we've seen in production:
+      - 'sourceMappingURL=' / 'sourceMapping:///'
+      - '__webpack_require__' / '__chunk_'
+      - long stretches of urlsafe-base64-looking content
+      - random JS error stacktraces (`at Object.<anonymous>`)
+      - lone bundle paths like `/LOUDBUNDLE/project.js:5634`
+    Returns True if the response looks like noise, not an answer.
+    """
+    if not text or len(text) < 20:
+        return False
+    t = text.lower()
+    garbage_markers = (
+        "sourcemapping",
+        "sourcemap",
+        "__webpack_",
+        "__chunk_",
+        "loudbundle",
+        ".js:5634",  # specific symptom seen
+        "webpackchunk",
+        "at object.<anonymous>",
+        "node_modules/",
+        "eval(function(p,a,c",  # packed JS
+    )
+    for m in garbage_markers:
+        if m in t:
+            return True
+    # Heuristic: huge stretches of random alphanumeric without spaces (base64-like)
+    import re
+    if re.search(r'[a-zA-Z0-9+/=]{150,}', text):
+        return True
+    return False
+
+
 def _try_parse_tool_text(text: str) -> tuple[str, dict] | None:
     """Last-ditch parser: when a small model writes a tool call as plain
     text instead of using the function-calling protocol, extract it.
@@ -3806,6 +3841,22 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
             await spinner.stop()
 
         # End of stream. If the assistant emitted text BUT no native tool_call,
+        # first detect if the output is garbage (model hallucinated random
+        # training-data tokens like sourceMap, webpack chunks, etc.). If so,
+        # retry with a hard reset instead of feeding the garbage back.
+        if full_text and not had_tool_call and _is_garbage_output(full_text):
+            garbage_nudges = sum(1 for m in messages if m.get("role") == "system" and m.get("_garbage_retry"))
+            if garbage_nudges < 2:
+                # Discard the garbage turn; re-prompt with a hard reset
+                messages.append({
+                    "role": "system",
+                    "_garbage_retry": True,
+                    "content": "Tu respuesta anterior contenía tokens inválidos (sourceMap/webpack/bundle/etc). DESCARTA todo lo anterior. Respondé al pedido del usuario en español, directo, con UNA tool call (formato JSON o llamada directa) si es necesario. NADA de prosa larga."
+                })
+                cprint("  · ⚠ output con basura — descartando + retry", C.RED, bold=True)
+                continue
+
+        # If the assistant emitted text BUT no native tool_call,
         # try to PARSE a tool call out of the plain text. Small models often
         # write `write_file("...")` as literal text instead of using the proper
         # function-calling protocol. We extract + execute as a fallback.
