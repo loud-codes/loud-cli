@@ -4,12 +4,23 @@
 
 $ErrorActionPreference = "Stop"
 
+# ───────────────────────── encoding fix ─────────────────────────
+# Windows PowerShell uses Windows-1252 by default — the LOUD ASCII art
+# (block characters ██╗) renders as `?????`. Force UTF-8 for console
+# I/O so the banner displays correctly on cmd.exe / PowerShell 5+.
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+    [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
+    $OutputEncoding           = [System.Text.UTF8Encoding]::new()
+    chcp 65001 *> $null
+} catch {}
+
 # ───────────────────────── style ─────────────────────────
 function Brand($text) { Write-Host $text -ForegroundColor Green }
-function Step($text)  { Write-Host "  ▸ $text" -ForegroundColor Magenta }
-function Ok($text)    { Write-Host "  ✓ $text" -ForegroundColor Green }
-function Warn($text)  { Write-Host "  ! $text" -ForegroundColor Yellow }
-function Bail($text)  { Write-Host "  ✗ $text" -ForegroundColor Red; exit 1 }
+function Step($text)  { Write-Host "  > $text" -ForegroundColor Magenta }
+function Ok($text)    { Write-Host "  [OK] $text" -ForegroundColor Green }
+function Warn($text)  { Write-Host "  [!] $text" -ForegroundColor Yellow }
+function Bail($text)  { Write-Host "  [X] $text" -ForegroundColor Red; exit 1 }
 
 Write-Host ""
 Brand "  ██╗      ██████╗ ██╗   ██╗██████╗"
@@ -25,15 +36,34 @@ Write-Host ""
 Step "Checking Python >= 3.10"
 
 # Find a real Python (not the Microsoft Store stub which only triggers a Store dialog).
+# Prefer specific stable versions (3.12 → 3.11 → 3.10) via the `py` launcher
+# before falling back to whichever python is on PATH. Skips 3.14+ which is
+# bleeding-edge and many packages still don't support it.
 function Find-RealPython {
-    foreach ($candidate in @('py', 'python3', 'python')) {
+    # 1) `py -3.X` for specific stable minors
+    foreach ($ver in @('3.12','3.11','3.10','3.13')) {
+        $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+        if ($pyLauncher) {
+            $out = & $pyLauncher.Source "-$ver" --version 2>&1
+            if ($out -match 'Python (\d+)\.(\d+)') {
+                $major = [int]$Matches[1]; $minor = [int]$Matches[2]
+                if ($major -ge 3 -and $minor -ge 10) {
+                    return @{ cmd = $pyLauncher; version = $out; argPrefix = @("-$ver") }
+                }
+            }
+        }
+    }
+    # 2) Generic launchers
+    foreach ($candidate in @('python3', 'python', 'py')) {
         $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
         if (-not $cmd) { continue }
         try {
             $out = & $cmd.Source --version 2>&1
             if ($out -match 'Python (\d+)\.(\d+)') {
                 $major = [int]$Matches[1]; $minor = [int]$Matches[2]
-                if ($major -ge 3 -and $minor -ge 10) { return @{ cmd = $cmd; version = $out } }
+                if ($major -ge 3 -and $minor -ge 10 -and $minor -le 13) {
+                    return @{ cmd = $cmd; version = $out; argPrefix = @() }
+                }
             }
         } catch {}
     }
@@ -115,9 +145,51 @@ Ok "unpacked"
 
 # ───────────────────────── venv + deps ─────────────────────────
 $Venv = Join-Path $InstallDir "venv"
+
+function Try-CreateVenv($pyCmd, $argPrefix) {
+    $venvArgs = @()
+    if ($argPrefix) { $venvArgs += $argPrefix }
+    $venvArgs += @('-m', 'venv', $Venv)
+    Remove-Item -Recurse -Force $Venv -ErrorAction SilentlyContinue
+    $proc = Start-Process -FilePath $pyCmd -ArgumentList $venvArgs -NoNewWindow -Wait -PassThru -RedirectStandardError "$env:TEMP\loud-venv-err.txt"
+    return $proc.ExitCode
+}
+
 Step "Creating isolated Python env"
-& $pyInfo.cmd.Source -m venv $Venv
-Ok "venv ready"
+$venvExit = Try-CreateVenv $pyInfo.cmd.Source $pyInfo.argPrefix
+if ($venvExit -ne 0) {
+    $errTxt = ""
+    if (Test-Path "$env:TEMP\loud-venv-err.txt") { $errTxt = Get-Content "$env:TEMP\loud-venv-err.txt" -Raw }
+    Warn "venv falló con tu Python actual ($($pyInfo.version)). Error:"
+    Write-Host "    $errTxt" -ForegroundColor DarkGray
+    # If we're on bleeding-edge Python (3.14+) or saw the 'platform independent libraries'
+    # error, auto-offer Python 3.12 via winget.
+    $is_python_broken = ($pyInfo.version -match 'Python 3\.(1[4-9]|[2-9]\d)' -or $errTxt -match 'platform independent libraries')
+    $hasWinget = (Get-Command winget -ErrorAction SilentlyContinue) -ne $null
+    if ($is_python_broken -and $hasWinget) {
+        Warn "Tu Python está roto o es demasiado nuevo. Instalo Python 3.12 (estable) ahora..."
+        $process = Start-Process -FilePath 'winget' -ArgumentList @(
+            'install', '--id', 'Python.Python.3.12',
+            '--silent', '--accept-source-agreements', '--accept-package-agreements'
+        ) -NoNewWindow -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            Bail "winget install Python.Python.3.12 falló (exit $($process.ExitCode))."
+        }
+        Refresh-Path
+        Start-Sleep -Seconds 3
+        # Re-locate Python — preferring py -3.12 now that it exists
+        $pyInfo = Find-RealPython
+        if (-not $pyInfo) {
+            Bail "Python 3.12 instalado pero no se encuentra. Cerrá PowerShell y reabrí, después corré: iwr -useb https://loud.codes/install.ps1 | iex"
+        }
+        Step "Reintentando venv con $($pyInfo.version)"
+        $venvExit = Try-CreateVenv $pyInfo.cmd.Source $pyInfo.argPrefix
+    }
+    if ($venvExit -ne 0) {
+        Bail "venv sigue fallando. Mostrame el output exacto y vemos."
+    }
+}
+Ok "venv ready ($($pyInfo.version))"
 
 Step "Installing dependencies"
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
