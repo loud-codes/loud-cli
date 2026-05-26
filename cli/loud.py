@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.5"
+__version__ = "1.6.6"
 
 # ───────────────────── Config ─────────────────────
 
@@ -2208,22 +2208,69 @@ TOOLS_SCHEMA = [
 
 
 def _try_parse_tool_text(text: str) -> tuple[str, dict] | None:
-    """Last-ditch parser: when a small model writes `write_file("a", "b")` as
-    plain text instead of using the function-calling protocol, extract it.
-    Returns (tool_name, args_dict) or None if no parseable call found.
+    """Last-ditch parser: when a small model writes a tool call as plain
+    text instead of using the function-calling protocol, extract it.
+    Returns (tool_name, args_dict) or None.
 
-    Only matches when the text is *predominantly* one tool call (we allow
-    leading/trailing prose but the actual call must look like a Python-style
-    `name(...)` expression). Args are parsed via ast.literal_eval so we
-    accept strings, numbers, bools, None — but NEVER arbitrary code.
+    Recognizes THREE common formats emitted by qwen/llama models:
+      A) Python style:    write_file("path", "content")
+      B) JSON style:      {"name": "write_file", "arguments": {...}}
+      C) Tagged JSON:     <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+
+    All argument values are parsed via ast.literal_eval / json.loads — only
+    literals, never arbitrary code.
     """
-    import ast, re
+    import ast, re, json
     if not text:
         return None
-    # Find all `tool_name(...)` candidates, prefer the LAST one (after any
-    # planning prose). Tool names are word chars, args is any until the
-    # matching `)` (we do depth-tracking instead of regex to handle nested).
     valid_names = set(TOOL_FNS.keys())
+    # ── (C) <tool_call>{...}</tool_call> tag → strip tag, fall through to (B) ──
+    tag_match = re.search(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', text, re.DOTALL)
+    json_candidate = tag_match.group(1) if tag_match else None
+    # ── (B) bare JSON object with name + arguments ──
+    if not json_candidate:
+        # Find a JSON object that has "name" and ("arguments" or "parameters")
+        for m in re.finditer(r'\{[^{}]*"name"\s*:\s*"([a-z_][a-z0-9_]*)"[^{}]*(\{[^{}]*\})?\s*\}', text, re.DOTALL):
+            json_candidate = m.group(0)
+            break
+        if not json_candidate:
+            # broader: any JSON-looking object containing "name"
+            obj_re = re.compile(r'\{[\s\S]{0,4000}?"name"\s*:\s*"([a-z_][a-z0-9_]*)"[\s\S]{0,4000}?\}', re.DOTALL)
+            mm = obj_re.search(text)
+            if mm:
+                # try to find balanced braces from the start of the match
+                start = mm.start()
+                depth = 0
+                in_str = None
+                i = start
+                while i < len(text):
+                    ch = text[i]
+                    if in_str:
+                        if ch == '\\':
+                            i += 2; continue
+                        if ch == in_str:
+                            in_str = None
+                    else:
+                        if ch == '"':
+                            in_str = '"'
+                        elif ch == '{':
+                            depth += 1
+                        elif ch == '}':
+                            depth -= 1
+                            if depth == 0:
+                                json_candidate = text[start:i + 1]
+                                break
+                    i += 1
+    if json_candidate:
+        try:
+            obj = json.loads(json_candidate)
+            name = obj.get("name")
+            args = obj.get("arguments") or obj.get("parameters") or {}
+            if isinstance(name, str) and name in valid_names and isinstance(args, dict):
+                return name, args
+        except Exception:
+            pass  # fall through to Python-style
+    # ── (A) Python style: tool_name(...) ──
     # Find candidate name positions
     candidates = []
     for m in re.finditer(r'\b([a-z][a-z0-9_]+)\s*\(', text):
