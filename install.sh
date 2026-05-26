@@ -74,14 +74,90 @@ esac
 ok "${PLATFORM} (${ARCH})"
 
 step "Checking Python ≥ 3.10"
-if ! command -v python3 >/dev/null; then
-  fail "python3 not found. Install Python first: brew install python (macOS) or apt-get install python3 (Linux)"
-fi
-PY_VERSION=$(python3 --version | awk '{print $2}')
-PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
-PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
-if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
-  fail "python ${PY_VERSION} too old, need 3.10+"
+
+# Detect distro/package-manager for auto-install offer
+detect_pm() {
+  if [ "$OS" = "Darwin" ]; then
+    command -v brew >/dev/null && echo "brew" && return
+    echo "macos-no-brew"; return
+  fi
+  if command -v apt-get >/dev/null; then echo "apt"; return; fi
+  if command -v dnf     >/dev/null; then echo "dnf"; return; fi
+  if command -v yum     >/dev/null; then echo "yum"; return; fi
+  if command -v pacman  >/dev/null; then echo "pacman"; return; fi
+  if command -v zypper  >/dev/null; then echo "zypper"; return; fi
+  if command -v apk     >/dev/null; then echo "apk"; return; fi
+  echo "unknown"
+}
+
+py_install_cmd() {
+  case "$1" in
+    brew)   echo "brew install python@3.12" ;;
+    apt)    echo "sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip" ;;
+    dnf)    echo "sudo dnf install -y python3 python3-pip" ;;
+    yum)    echo "sudo yum install -y python3 python3-pip" ;;
+    pacman) echo "sudo pacman -S --noconfirm python python-pip" ;;
+    zypper) echo "sudo zypper install -y python3 python3-pip" ;;
+    apk)    echo "sudo apk add python3 py3-pip" ;;
+    *) echo "" ;;
+  esac
+}
+
+offer_python_install() {
+  local pm="$1"
+  local cmd
+  cmd=$(py_install_cmd "$pm")
+  if [ -z "$cmd" ]; then
+    printf "\n  ${YELLOW}!${RESET}  No detecté package manager. Instalá Python 3.10+ manualmente:\n"
+    printf "        ${CYAN}https://www.python.org/downloads/${RESET}\n\n"
+    fail "Python no disponible y no puedo auto-instalarlo."
+  fi
+  printf "\n  ${YELLOW}!${RESET}  Python 3.10+ no encontrado. Puedo instalarlo por vos.\n"
+  printf "        Comando que voy a correr: ${CYAN}%s${RESET}\n" "$cmd"
+  printf "        Instalar Python 3.12 ahora? [Y/n] "
+  read -r ans </dev/tty || ans="y"
+  case "$ans" in
+    [nN]*) fail "OK, instalá Python manualmente y volvé a correr este installer." ;;
+    *) ;;
+  esac
+  step "Instalando Python via ${pm}"
+  eval "$cmd"
+  if [ $? -ne 0 ]; then
+    fail "instalación de Python falló — revisá el output arriba y reintentá."
+  fi
+  ok "Python instalado"
+}
+
+find_python() {
+  for candidate in python3.12 python3.11 python3.10 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      local v
+      v=$("$candidate" --version 2>&1 | awk '{print $2}')
+      local maj min
+      maj=$(echo "$v" | cut -d. -f1)
+      min=$(echo "$v" | cut -d. -f2)
+      if [ "$maj" -ge 3 ] 2>/dev/null && [ "$min" -ge 10 ] 2>/dev/null; then
+        PY_BIN="$candidate"
+        PY_VERSION="$v"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+if ! find_python; then
+  PM=$(detect_pm)
+  if [ "$PM" = "macos-no-brew" ]; then
+    printf "\n  ${YELLOW}!${RESET}  No tenés Homebrew. Instalalo primero:\n"
+    printf "        ${CYAN}/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"${RESET}\n"
+    printf "        Después corré este installer de nuevo.\n\n"
+    fail "Homebrew no instalado en macOS."
+  fi
+  offer_python_install "$PM"
+  if ! find_python; then
+    fail "Python instalado pero no se encuentra en PATH — abrí una nueva terminal y reintentá."
+  fi
 fi
 ok "python ${PY_VERSION}"
 
@@ -110,7 +186,7 @@ ok "source unpacked"
 # ───────────────────────── venv + deps ─────────────────────────
 
 step "Creating isolated Python env"
-( python3 -m venv "$INSTALL_DIR/venv" ) &
+( "$PY_BIN" -m venv "$INSTALL_DIR/venv" ) &
 spin $! "creating venv at $INSTALL_DIR/venv"
 
 step "Installing dependencies"

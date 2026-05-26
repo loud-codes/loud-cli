@@ -23,20 +23,69 @@ Write-Host ""
 
 # ───────────────────────── checks ─────────────────────────
 Step "Checking Python >= 3.10"
-try {
-    # PowerShell 5.x compatible — no null-coalescing ?? operator.
-    $py = Get-Command python3 -ErrorAction SilentlyContinue
-    if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
-    if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
-    if (-not $py) { Bail "Python no encontrado. Instala desde python.org (3.10+) o ejecuta: winget install Python.Python.3.12" }
-    $version = & $py.Source --version 2>&1
-    if ($version -notmatch "Python (\d+)\.(\d+)") { Bail "no se pudo detectar version de Python" }
-    $major = [int]$Matches[1]; $minor = [int]$Matches[2]
-    if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 10)) {
-        Bail "Python $version es muy viejo, necesitas 3.10+"
+
+# Find a real Python (not the Microsoft Store stub which only triggers a Store dialog).
+function Find-RealPython {
+    foreach ($candidate in @('py', 'python3', 'python')) {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if (-not $cmd) { continue }
+        try {
+            $out = & $cmd.Source --version 2>&1
+            if ($out -match 'Python (\d+)\.(\d+)') {
+                $major = [int]$Matches[1]; $minor = [int]$Matches[2]
+                if ($major -ge 3 -and $minor -ge 10) { return @{ cmd = $cmd; version = $out } }
+            }
+        } catch {}
     }
-    Ok "$version"
-} catch { Bail $_.Exception.Message }
+    return $null
+}
+
+function Refresh-Path {
+    $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user    = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = ($machine, $user -join ';')
+}
+
+$pyInfo = Find-RealPython
+
+if (-not $pyInfo) {
+    Write-Host ""
+    Warn "Python 3.10+ no encontrado en este sistema."
+    $hasWinget = (Get-Command winget -ErrorAction SilentlyContinue) -ne $null
+    if ($hasWinget) {
+        Write-Host "  Puedo instalarlo automáticamente con winget (oficial de Microsoft)." -ForegroundColor White
+        $answer = Read-Host "  Instalar Python 3.12 ahora? [Y/n]"
+        if ($answer -eq '' -or $answer -match '^[yYsS]') {
+            Step "Instalando Python 3.12 via winget (~1-2 min)"
+            $process = Start-Process -FilePath 'winget' -ArgumentList @(
+                'install', '--id', 'Python.Python.3.12',
+                '--silent', '--accept-source-agreements', '--accept-package-agreements'
+            ) -NoNewWindow -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+                Bail "winget install falló (exit $($process.ExitCode)). Instalá manual desde https://www.python.org/downloads/ y volvé a correr este installer."
+            }
+            Ok "Python instalado"
+            Refresh-Path
+            Start-Sleep -Seconds 2
+            $pyInfo = Find-RealPython
+            if (-not $pyInfo) {
+                Bail "Python se instaló pero el shim no aparece en PATH. Cerrá y reabrí PowerShell, después corré: iwr -useb https://loud.codes/install.ps1 | iex"
+            }
+        } else {
+            Bail "OK, instalá Python manualmente y volvé a correr este installer."
+        }
+    } else {
+        Write-Host ""
+        Write-Host "  Necesitás Python 3.10+. Dos opciones:" -ForegroundColor White
+        Write-Host "    1) Descargá el instalador oficial:" -ForegroundColor White
+        Write-Host "       https://www.python.org/downloads/" -ForegroundColor Cyan
+        Write-Host "       (marcá 'Add Python to PATH' al instalar)" -ForegroundColor DarkGray
+        Write-Host "    2) Instalá winget desde Microsoft Store y volvé a correr este script" -ForegroundColor White
+        Bail "Python no disponible y winget tampoco — instalá manual y reintentá."
+    }
+}
+
+Ok "$($pyInfo.version)"
 
 $LoudHome = if ($env:LOUD_HOME) { $env:LOUD_HOME } else { Join-Path $env:USERPROFILE ".loud" }
 $InstallDir = Join-Path $LoudHome "install"
@@ -67,7 +116,7 @@ Ok "unpacked"
 # ───────────────────────── venv + deps ─────────────────────────
 $Venv = Join-Path $InstallDir "venv"
 Step "Creating isolated Python env"
-& $py.Source -m venv $Venv
+& $pyInfo.cmd.Source -m venv $Venv
 Ok "venv ready"
 
 Step "Installing dependencies"
