@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.13"
+__version__ = "1.6.14"
 
 # ───────────────────── Config ─────────────────────
 
@@ -3468,6 +3468,7 @@ async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
                     yield {"error": f"http {r.status_code}: {body.decode(errors='replace')[:300]}"}
                     return
                 buf = ""
+                pending_tcs = []  # accumulate tool calls across stream
                 async for chunk in r.aiter_text():
                     buf += chunk
                     while True:
@@ -3479,9 +3480,32 @@ async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
                         if not line:
                             continue
                         try:
-                            yield json.loads(line)
+                            j = json.loads(line)
                         except Exception:
                             yield {"raw": line}
+                            continue
+                        # The backend forwards ollama's NDJSON 1:1. We need to
+                        # convert ollama's `message.tool_calls` into the events
+                        # the agent loop expects (assistant_tool_call + tool_call).
+                        # Pass-through events (with explicit "event" field) and
+                        # ollama content chunks unchanged.
+                        if isinstance(j, dict) and "event" not in j:
+                            msg = j.get("message") or {}
+                            if isinstance(msg, dict) and msg.get("tool_calls"):
+                                for tc in msg["tool_calls"]:
+                                    fn   = (tc.get("function") or {}).get("name", "")
+                                    args = (tc.get("function") or {}).get("arguments") or {}
+                                    if isinstance(args, str):
+                                        try: args = json.loads(args)
+                                        except Exception: args = {}
+                                    pending_tcs.append(tc)
+                                    if len(pending_tcs) == 1:
+                                        yield {"event": "assistant_tool_call",
+                                               "content": msg.get("content", "") or "",
+                                               "tool_calls": pending_tcs}
+                                    yield {"event": "tool_call", "name": fn, "args": args, "tool_call_id": tc.get("id")}
+                                continue
+                        yield j
                 if buf.strip():
                     try:
                         yield json.loads(buf.strip())
