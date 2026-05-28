@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.12"
+__version__ = "1.6.13"
 
 # ───────────────────── Config ─────────────────────
 
@@ -4025,16 +4025,19 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                 "hace", "hacé", "build", "run", "start", "spin up",
             ))
             looks_like_plan = any(m in t for m in announce_markers)
-            forced_nudges = sum(1 for m in messages if m.get("role") == "system" and m.get("_force_exec"))
-            # Nudge si: anuncia plan, O si el user pidió acción y el modelo solo respondió texto
+            forced_nudges = sum(1 for m in messages if m.get("role") == "user" and m.get("_force_exec"))
+            # Nudge si: anuncia plan, O si el user pidió acción y el modelo solo respondió texto.
+            # El nudge se inyecta como mensaje del USER ("dale, ejecutá") en lugar de system
+            # adversarial — los modelos grandes responden al system reprimiéndose y pidiendo
+            # clarificación. Al usuario lo siguen sin discutir.
             if (looks_like_plan or user_action_intent) and forced_nudges < 3:
                 messages.append({"role": "assistant", "content": full_text})
                 messages.append({
-                    "role": "system",
+                    "role": "user",
                     "_force_exec": True,
-                    "content": "Acabás de anunciar un plan SIN llamar ninguna tool. Eso viola REGLA INVIOLABLE #7. EJECUTÁ AHORA la primera tool DEL PLAN QUE VOS MISMO ACABÁS DE DESCRIBIR (no inventes otro tema, no cambies de tarea). Releé el último mensaje del usuario, releé tu propio plan, y emití la tool exacta para el primer paso. PROHIBIDO cambiar de contexto, prohibido empezar a hablar de archivos o flows distintos al goal del usuario."
+                    "content": "Dale, ejecutá ese paso ahora con la tool que corresponda.",
                 })
-                cprint("  · ⚠ anunciaste plan sin tool — forzando ejecución", C.YELLOW, bold=True)
+                cprint("  · ⚠ dale, ejecutá ese paso", C.YELLOW)
                 continue
             cprint("", "")  # newline after typewriter
             messages.append({"role": "assistant", "content": full_text})
