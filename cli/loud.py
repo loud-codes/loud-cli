@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.7"
+__version__ = "1.6.9"
 
 # ───────────────────── Config ─────────────────────
 
@@ -3720,6 +3720,7 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
 
     spinner = LoadingSpinner()
 
+    tool_call_history: list[tuple[str, str]] = []  # (name, args_hash) for anti-loop
     for iteration in range(cfg["max_iterations"]):
         spinner.start(random.choice(_LOADING_VERBS))
         full_text = ""
@@ -3756,6 +3757,21 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                     # Client-side tool execution
                     if name in TOOL_FNS:
                         await spinner.stop()
+                        # Anti-loop: si esta misma tool+args ya falló 2 veces antes
+                        # con el mismo error, frenar el bucle e inyectar guidance.
+                        import hashlib as _hh, json as _json
+                        args_key = _hh.md5(_json.dumps(args, sort_keys=True, default=str).encode()).hexdigest()[:12]
+                        history_match = tool_call_history.count((name, args_key))
+                        if history_match >= 2:
+                            cprint(f"  · ⚠ loop detectado: {name}({args_key}) llamado 3x — abortando esta dirección", C.RED, bold=True)
+                            messages.append({
+                                "role": "tool",
+                                "content": f"ERROR LOOP: ya intentaste {name} con los mismos args 3 veces. CAMBIÁ DE ENFOQUE: si esperabas un job pero no existe, ANTES tenés que crearlo con bash_background(cmd, label). No vuelvas a llamar {name} con los mismos args. Si el goal del usuario era crear+servir+verificar, vas en orden: 1) write_file, 2) bash_background con setsid o python -u, 3) sleep + curl.",
+                            })
+                            tool_call_history.append((name, args_key))
+                            spinner.start(_TOOL_LABEL.get(name, name.capitalize()))
+                            continue
+                        tool_call_history.append((name, args_key))
                         # LOUD console header: '● Bash(python3 --version)'
                         header = _format_tool_call_header(name, args)
                         sys.stdout.write(f"\n  {C.BRAND}●{C.RESET} {C.BOLD}{header}{C.RESET}\n"); sys.stdout.flush()
@@ -3864,6 +3880,18 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
             parsed = _try_parse_tool_text(full_text)
             if parsed:
                 name, args = parsed
+                # Anti-loop también para text-parsed calls
+                import hashlib as _hh2, json as _json2
+                args_key = _hh2.md5(_json2.dumps(args, sort_keys=True, default=str).encode()).hexdigest()[:12]
+                if tool_call_history.count((name, args_key)) >= 2:
+                    cprint(f"  · ⚠ loop detectado (text-parsed): {name} — abortando", C.RED, bold=True)
+                    messages.append({"role": "assistant", "content": full_text})
+                    messages.append({
+                        "role": "system",
+                        "content": f"LOOP cortado: ya emitiste {name} con los mismos args 3 veces. Si el goal era servidor http: 1) write_file 2) bash_background('python3 -m http.server PUERTO --directory DIR', label='http-PUERTO') 3) sleep 1.5 4) bash('curl -fsS http://localhost:PUERTO/'). Hace los 4 pasos en ORDEN.",
+                    })
+                    continue
+                tool_call_history.append((name, args_key))
                 cprint(f"  · 🔧 detectado tool en texto plano → ejecutando: {name}", C.BRAND, bold=True)
                 messages.append({"role": "assistant", "content": full_text})
                 # Render + execute as if it were a real tool_call
@@ -3935,24 +3963,58 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
         # synthesize a response using the tool outputs we just appended.
         if had_tool_call:
             continue
-        # No text and no tool calls — try ONE more time with an explicit nudge
-        # instead of bailing. Small models sometimes emit empty turns; a
-        # system reminder usually unsticks them.
+        # No text and no tool calls — escalating recovery instead of bailing.
         nudges_used = sum(1 for m in messages if m.get("role") == "system" and m.get("_nudge"))
-        if nudges_used < 2:
+        if nudges_used == 0:
+            # Stage A: concrete-example nudge with the exact tool-call format
             messages.append({
                 "role": "system",
                 "content": (
-                    "Acabás de emitir un turno vacío. No paraste la tarea: el goal sigue abierto. "
-                    "En este próximo turno emití UNA tool call concreta que avance hacia el goal, "
-                    "o si genuinamente terminaste, escribí UNA frase de cierre. No quedarte callado."
+                    "Turno vacío. El goal sigue abierto. EJEMPLOS exactos de cómo emitir una tool:\n"
+                    "  {\"name\": \"bash\", \"arguments\": {\"cmd\": \"ls /tmp\"}}\n"
+                    "  {\"name\": \"scrape\", \"arguments\": {\"url\": \"https://example.com\", \"css\": \"h1\"}}\n"
+                    "  {\"name\": \"write_file\", \"arguments\": {\"path\": \"/tmp/x.html\", \"content\": \"<h1>hi</h1>\"}}\n"
+                    "Emití UNA tool ahora con esos pasos del plan que anunciaste, o si terminaste cerrá con 1 frase."
                 ),
                 "_nudge": True,
             })
-            cprint("  · loud nudge → reintentando", C.GRAY)
+            cprint("  · loud nudge → ejemplo concreto", C.GRAY)
             continue
-        # Two nudges in and still nothing — give up gracefully.
-        cprint("  · (turno vacío persistente)", C.YELLOW)
+        if nudges_used == 1:
+            # Stage B: pedirle que diga qué le falta — habilita pedir ayuda
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Seguiste sin responder. Hacé una de TRES cosas en este turno (no quedarte callado):\n"
+                    "  1) Si tenés un plan claro → emití ya la tool call exacta.\n"
+                    "  2) Si te falta info concreta (URL, path, credencial, decisión) → preguntámela al usuario en UNA línea, breve.\n"
+                    "  3) Si no sabés cómo seguir → llamá ask_oracle con la pregunta técnica específica.\n"
+                    "Está PROHIBIDO devolver un turno vacío."
+                ),
+                "_nudge": True,
+            })
+            cprint("  · loud nudge → pedí ayuda o ejecutá", C.GRAY)
+            continue
+        # Stage C: ya con 2 nudges falló. Recuperamos el último plan que anunció
+        # el modelo y se lo mostramos al usuario explícitamente para que sepa
+        # dónde quedó el flujo en vez de simplemente "(turno vacío persistente)".
+        last_plan = ""
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and m.get("content"):
+                t = (m["content"] or "").strip()
+                if t and not _is_garbage_output(t):
+                    last_plan = t[:400]
+                    break
+        cprint("", "")
+        cprint("  · me trabé — el modelo no avanza ni responde nada en 3 intentos.", C.YELLOW, bold=True)
+        if last_plan:
+            cprint("    último plan que anuncié:", C.GRAY)
+            for line in last_plan.split("\n")[:6]:
+                cprint(f"      › {line[:120]}", C.GRAY)
+        cprint("    decime una de estas:", C.GRAY)
+        cprint("      • 'dale' o 'continúa' → reintento desde donde quedé", C.GRAY)
+        cprint("      • info que falte (path/url/decisión)              → la incorporo", C.GRAY)
+        cprint("      • 'cambiá de enfoque' o nuevo prompt              → tirá otra estrategia", C.GRAY)
         return ""
 
     # Hit the iteration cap. The new rule is to keep trying, so emit one
