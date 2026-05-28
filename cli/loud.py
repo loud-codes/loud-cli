@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.11"
+__version__ = "1.6.12"
 
 # ───────────────────── Config ─────────────────────
 
@@ -2607,12 +2607,13 @@ Patrón obligatorio cuando hay multi-step:
 3. Esperás el resultado, encadenás la segunda tool, y así hasta terminar.
 4. Recién al final escribís texto al usuario explicando lo que pasó.
 
-Ejemplo correcto:
-> Usuario: "monta un index.html en localhost:2009"
-> LOUD (1 turno): "Creo el archivo y arranco un http.server en 2009." + tool call `write_file("index.html", "<!doctype html>...")`
-> [siguiente turno] tool call `bash_background("python3 -m http.server 2009", label="srv-2009")`
-> [siguiente turno] tool call `bash("curl -s http://localhost:2009 | head -5")`
-> "Listo, está sirviendo en http://localhost:2009 (pid …)."
+Ejemplos correctos (NOTA: estos son SOLO formato — adapta el tool y los args al goal del usuario, NO copies estos goals):
+
+> Goal A (server local): "Creo el archivo y arranco el server." + write_file → bash_background → bash curl
+> Goal B (scrape): "Saco el HTML y los headers." + scrape → http_get → write_file con el reporte
+> Goal C (audit): "Recon inicial." + scrape → http_get → bash curl headers → bash dig → write_file md
+
+**ANTI-CONTAMINATION CRÍTICO**: NUNCA importes el goal de un ejemplo al goal real. Si el user pidió auditar https://X, NO empieces a crear index.html porque eso aparece arriba como Goal A — releé QUÉ pidió el usuario y adaptate. El formato del ejemplo te sirve, el contenido NO.
 
 Si te encontrás escribiendo "Procedo a..." o "Voy a..." sin una tool call en el mismo response, parate y emití la tool.
 
@@ -4032,7 +4033,7 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                 messages.append({
                     "role": "system",
                     "_force_exec": True,
-                    "content": "Acabás de anunciar un plan SIN llamar ninguna tool. Eso viola REGLA INVIOLABLE #7. EJECUTÁ AHORA la primera tool del plan que acabás de describir. NO repitas el anuncio, llamá la tool directamente. Si el plan era 'crear index.html y luego servirlo', tu próxima acción es write_file(...) o bash_background(...) según corresponda."
+                    "content": "Acabás de anunciar un plan SIN llamar ninguna tool. Eso viola REGLA INVIOLABLE #7. EJECUTÁ AHORA la primera tool DEL PLAN QUE VOS MISMO ACABÁS DE DESCRIBIR (no inventes otro tema, no cambies de tarea). Releé el último mensaje del usuario, releé tu propio plan, y emití la tool exacta para el primer paso. PROHIBIDO cambiar de contexto, prohibido empezar a hablar de archivos o flows distintos al goal del usuario."
                 })
                 cprint("  · ⚠ anunciaste plan sin tool — forzando ejecución", C.YELLOW, bold=True)
                 continue
