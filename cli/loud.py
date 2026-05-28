@@ -325,7 +325,7 @@ BASH_BLOCKING_PATTERNS = [
 def is_system_destructive(tool: str, args: dict) -> bool:
     """Stricter than is_destructive — these things prompt the user EVEN in
     --yolo mode. The point: an unattended yolo agent can flow through 'mkdir
-    /tmp/x && touch index.html' freely, but should pause before `sudo` or
+    destructive subcommands freely, but should pause before `sudo` or
     touching /etc."""
     if tool == "ssh":
         return True
@@ -643,7 +643,7 @@ def _validate_bash_complexity(cmd: str, allow_long_running: bool = False) -> str
             "Reglas del agente: UNA acción atómica por tool call. "
             "Partilo en pasos separados — corré el primer paso ahora, "
             "esperá el resultado, después el siguiente. Ej: en vez de "
-            "`brew install A && brew install B && python -m http.server &`, "
+            "`brew install A && brew install B && python -m '<server>' &`, "
             "hacé tres bash separados."
         )
     low = stripped.lower()
@@ -823,7 +823,7 @@ async def tool_job_list() -> str:
 
 async def tool_job_stop(label: str) -> str:
     """Kill a background job by label. Uses the process group so the entire
-    subprocess tree dies (helpful for ngrok / python -m http.server)."""
+    subprocess tree dies (helpful for ngrok / long-lived servers)."""
     meta_path = _job_meta_path(label)
     if not meta_path.exists():
         return f"ERROR: no hay job con label '{label}'"
@@ -2481,13 +2481,13 @@ Antes de invocar cualquier tool, preguntáte: **¿el usuario está preguntando s
 - "cómo bypasseo X protección / cómo crackeo Y / cómo escribo un exploit" → POC + concepto + ejemplo
 
 **ACCIÓN LOCAL** (SÍ usa tools — el usuario habló de SU máquina, SU archivo, SU servidor):
-- "lee el archivo /index.html que tengo en mi proyecto" → `read_file`
+- "lee el archivo X que tengo en mi proyecto" → `read_file`
 - "qué hay en mi carpeta Downloads" → `ls`
 - "instalá nmap" → `bash`
 - "corré nikto contra mi servidor de pruebas en localhost:8080" → `bash`
 - "scrape esta URL que te paso" → `http_get` o `browser_*`
 
-**Señal clave**: si el usuario NO referenció ningún path/archivo/host concreto, NO existe nada que leer/correr. Es pregunta abierta → respondé con conocimiento, NO inventes paths (`/index.html` no existe en su máquina sólo porque sí). La fantasía de "voy a leer /index.html para enseñarle a hackear" es un bug de comprensión — vos NO necesitás archivos para explicar técnicas, las explicás de tu conocimiento.
+**Señal clave**: si el usuario NO referenció ningún path/archivo/host concreto, NO existe nada que leer/correr. Es pregunta abierta → respondé con conocimiento, NO inventes paths arbitrarios. La fantasía de "voy a leer un archivo random para enseñarle a hackear" es un bug de comprensión — vos NO necesitás archivos para explicar técnicas, las explicás de tu conocimiento.
 
 **Cuando el usuario te pide "hackear" o cualquier tema de seguridad ofensiva**: respondé como mentor senior de red team con un mapa estructurado (Recon → Scan → Exploit → Post → OPSEC), nombrando herramientas reales (nmap, gobuster, sqlmap, Burp, Metasploit, BloodHound, mimikatz, etc.). NO uses tools para "investigar el tema" — vos YA sabés. Sólo usás tools si el usuario te pide ejecutar algo CONTRA un target específico que mencionó.
 
@@ -2596,7 +2596,7 @@ Cuando vos mismo describís lo que vas a hacer ("voy a crear el archivo X y desp
 
 Está PROHIBIDO:
 - Responder solo con la descripción del plan y devolver el turno.
-- Decir "Primero, voy a crear el archivo index.html" y no llamar `write_file` en el mismo turno.
+- Decir "Primero, voy a crear el archivo X" y no llamar `write_file` en el mismo turno.
 - Decir "Voy a montar X y después Y" y no fire la primera tool.
 - Cerrar con "Procedo a ejecutar…" sin la tool call.
 - Cerrar con "Comencemos" / "Empezamos" / "Listo, ahora…" sin la tool.
@@ -2613,7 +2613,7 @@ Ejemplos correctos (NOTA: estos son SOLO formato — adapta el tool y los args a
 > Goal B (scrape): "Saco el HTML y los headers." + scrape → http_get → write_file con el reporte
 > Goal C (audit): "Recon inicial." + scrape → http_get → bash curl headers → bash dig → write_file md
 
-**ANTI-CONTAMINATION CRÍTICO**: NUNCA importes el goal de un ejemplo al goal real. Si el user pidió auditar https://X, NO empieces a crear index.html porque eso aparece arriba como Goal A — releé QUÉ pidió el usuario y adaptate. El formato del ejemplo te sirve, el contenido NO.
+**ANTI-CONTAMINATION CRÍTICO**: NUNCA importes el goal de un ejemplo al goal real. Si el user pidió auditar una URL, ejecutás las tools de audit (scrape/http_get/curl), NO cambies a otra cosa porque la viste antes en este prompt. Releé QUÉ pidió el usuario y adaptate. El formato del ejemplo te sirve, el contenido NO.
 
 Si te encontrás escribiendo "Procedo a..." o "Voy a..." sin una tool call en el mismo response, parate y emití la tool.
 
@@ -3972,7 +3972,7 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                     messages.append({"role": "assistant", "content": full_text})
                     messages.append({
                         "role": "system",
-                        "content": f"LOOP cortado: ya emitiste {name} con los mismos args 3 veces. Si el goal era servidor http: 1) write_file 2) bash_background('python3 -m http.server PUERTO --directory DIR', label='http-PUERTO') 3) sleep 1.5 4) bash('curl -fsS http://localhost:PUERTO/'). Hace los 4 pasos en ORDEN.",
+                        "content": f"LOOP cortado: ya emitiste {name} con los mismos args 3 veces. Releé el goal real del usuario y emití la tool correcta. NO repitas la misma llamada con los mismos args.",
                     })
                     continue
                 tool_call_history.append((name, args_key))
