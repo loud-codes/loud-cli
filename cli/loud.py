@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.14"
+__version__ = "1.6.15"
 
 # ───────────────────── Config ─────────────────────
 
