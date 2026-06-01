@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.15"
+__version__ = "1.6.16"
 
 # ───────────────────── Config ─────────────────────
 
@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
     # curl → report flows without spawning duplicate processes or looping on
     # job_status. Users can downshift with --model loud-go for raw speed.
     "model": "loud-pro",
-    "max_iterations": 50,    # multi-step plans + self-recovery on errors need room
+    "max_iterations": 200,   # correr hasta terminar la tarea, no abandonar a mitad de un proceso largo (el anti-loop corta repeticiones, así que no hay loop infinito)
     "permission_mode": "ask",      # ask | yolo | safe (safe = block destructive ops)
     "typewriter": True,
     # Compute mode for chat inference:
@@ -3389,7 +3389,7 @@ async def _stream_chat_local(cfg: dict, messages: list[dict]):
         "options": {"num_predict": -1},
     }
     try:
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=600.0, write=600.0, pool=None)) as client:
             async with client.stream("POST", f"{url}/api/chat", json=payload) as r:
                 if r.status_code >= 400:
                     body = await r.aread()
@@ -3458,7 +3458,7 @@ async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
     }
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/x-ndjson"}
     try:
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=600.0, write=600.0, pool=None)) as client:
             async with client.stream("POST", f"{cfg['api_url']}/v1/chat", json=payload, headers=headers) as r:
                 if r.status_code == 401:
                     yield {"error": "auth_expired"}
