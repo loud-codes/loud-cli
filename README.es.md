@@ -1,13 +1,6 @@
 <div align="center">
 
-```
-  ██╗      ██████╗ ██╗   ██╗██████╗
-  ██║     ██╔═══██╗██║   ██║██╔══██╗
-  ██║     ██║   ██║██║   ██║██║  ██║
-  ██║     ██║   ██║██║   ██║██║  ██║
-  ███████╗╚██████╔╝╚██████╔╝██████╔╝
-  ╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝
-```
+<img src="https://gateway.pinata.cloud/ipfs/QmUyVgQg14DyXhRcXtFFNWue8whibtf6gVDgwunvdPYkMB" alt="LOUD" width="300">
 
 **IA terminal-first para devs.**
 Web dev · scraping · ops. Tus tools, tu máquina, tu control.

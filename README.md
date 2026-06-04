@@ -1,13 +1,6 @@
 <div align="center">
 
-```
-                ██╗      ██████╗ ██╗   ██╗██████╗
-                ██║     ██╔═══██╗██║   ██║██╔══██╗
-                ██║     ██║   ██║██║   ██║██║  ██║
-                ██║     ██║   ██║██║   ██║██║  ██║
-                ███████╗╚██████╔╝╚██████╔╝██████╔╝
-                ╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝
-```
+<img src="https://gateway.pinata.cloud/ipfs/QmUyVgQg14DyXhRcXtFFNWue8whibtf6gVDgwunvdPYkMB" alt="LOUD" width="300">
 
 ### **A terminal-first AI agent that lives on _your_ infrastructure.**
 
