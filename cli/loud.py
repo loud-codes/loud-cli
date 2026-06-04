@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.6.16"
+__version__ = "1.8.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -66,7 +66,11 @@ DEFAULT_CONFIG = {
     #   "local"  → talk to local Ollama 127.0.0.1:11434 (zero network latency,
     #              uses this machine's CPU/GPU, no RAG)
     #   "auto"   → try local first; fall back to cloud if local isn't ready
+    #   "custom" → talk to any OpenAI-compatible endpoint saved via `loud connect`
+    #              (LOUD's own endpoint, Groq, or any other AI). Multi-engine.
     "mode": "cloud",
+    "providers": [],          # [{name, base_url, api_key, model}] — `loud connect`
+    "active_provider": "",    # name of the provider used when mode == "custom"
     "local_ollama_url":   "http://127.0.0.1:11434",
     "local_model":        "qwen2.5:3b",          # ~2GB, runs on any modern laptop
     "local_model_vision": "llama3.2-vision:11b", # only auto-pulled if user opts in
@@ -1983,11 +1987,408 @@ async def tool_cult_ui_get(name: str) -> str:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
+# ───────────────────── Plan (todo) + Skills + Compactación — nativo LOUD ─────────────────────
+
+LOUD_SKILLS_DIR = LOUD_DIR / "skills"
+
+# Plan en memoria para la sesión actual. El agente descompone una tarea larga
+# en un checklist y va marcando items — así no pierde el hilo en trabajos de
+# muchos pasos ni re-hace lo ya terminado después de una compactación. SÓLO se
+# usa cuando la tarea lo amerita (3+ pasos); para pedidos simples no se toca.
+_TODOS: list[dict] = []
+_TODO_GLYPH = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]", "cancelled": "[-]"}
+
+
+def _render_todos(todos: list[dict]) -> str:
+    if not todos:
+        return "(plan vacío)"
+    return "\n".join(
+        f"  {_TODO_GLYPH.get(t.get('status', 'pending'), '[ ]')} {t.get('content', '')}"
+        for t in todos
+    )
+
+
+async def tool_todo(todos=None, merge: bool = False) -> str:
+    """Mantené el plan de una tarea LARGA como checklist. Pasá la lista completa
+    de items [{content, status}] (status: pending|in_progress|done|cancelled).
+    merge=True actualiza por id sin re-escribir todo. Sin args devuelve el plan."""
+    global _TODOS
+    if isinstance(todos, str):
+        try: todos = json.loads(todos)
+        except Exception: todos = None
+    if todos is None:
+        return f"Plan actual:\n{_render_todos(_TODOS)}"
+    norm = []
+    for i, t in enumerate(todos):
+        if isinstance(t, str):
+            t = {"content": t}
+        norm.append({
+            "id": str(t.get("id") or i + 1),
+            "content": str(t.get("content", "")).strip(),
+            "status": t.get("status", "pending"),
+        })
+    if merge and _TODOS:
+        by_id = {t["id"]: dict(t) for t in _TODOS}
+        for t in norm:
+            by_id[t["id"]] = {**by_id.get(t["id"], {}), **t}
+        _TODOS = list(by_id.values())
+    else:
+        _TODOS = norm
+    done = sum(1 for t in _TODOS if t.get("status") == "done")
+    return f"Plan actualizado ({done}/{len(_TODOS)} hechos):\n{_render_todos(_TODOS)}"
+
+
+def _scan_skills() -> dict:
+    """Mapea nombre-de-skill → (meta, body, path). Escanea ~/.loud/skills/**/SKILL.md."""
+    out: dict = {}
+    if not LOUD_SKILLS_DIR.exists():
+        return out
+    for sk in sorted(LOUD_SKILLS_DIR.rglob("SKILL.md")):
+        try:
+            raw = sk.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        meta: dict = {}
+        body = raw
+        m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", raw, re.DOTALL)
+        if m:
+            body = m.group(2)
+            for line in m.group(1).splitlines():
+                if ":" in line and not line.lstrip().startswith("#"):
+                    k, v = line.split(":", 1)
+                    meta[k.strip()] = v.strip().strip('"').strip("'")
+        name = (meta.get("name") or sk.parent.name).strip()
+        out[name] = (meta, body, sk)
+    return out
+
+
+_SKILLS_CACHE: dict | None = None
+
+
+def get_skills(refresh: bool = False) -> dict:
+    global _SKILLS_CACHE
+    if _SKILLS_CACHE is None or refresh:
+        _SKILLS_CACHE = _scan_skills()
+    return _SKILLS_CACHE
+
+
+async def tool_skills_list(filter: str | None = None) -> str:
+    """Lista las skills instaladas (paquetes de instrucciones reutilizables)."""
+    sk = get_skills()
+    if not sk:
+        return ("No hay skills instaladas. Se crean en ~/.loud/skills/<nombre>/SKILL.md "
+                "con frontmatter (name, description) + instrucciones markdown.")
+    rows = []
+    for name, (meta, _b, _p) in sorted(sk.items()):
+        blob = f"{name} {meta.get('description', '')}".lower()
+        if filter and filter.lower() not in blob:
+            continue
+        rows.append(f"  · {name} — {meta.get('description', '(sin descripción)')}")
+    return "Skills disponibles (cargá una con skill_view(name)):\n" + "\n".join(rows)
+
+
+async def tool_skill_view(name: str) -> str:
+    """Carga el contenido completo de una skill para seguir sus instrucciones."""
+    sk = get_skills()
+    key = (name or "").strip().lstrip("/")
+    entry = sk.get(key) or sk.get(key.replace("_", "-")) or sk.get(key.replace("-", "_"))
+    if not entry:
+        avail = ", ".join(sorted(sk)) or "(ninguna)"
+        return f"No existe la skill '{name}'. Disponibles: {avail}"
+    meta, body, path = entry
+    body = body.replace("${SKILL_DIR}", str(path.parent)).strip()
+    return f"[SKILL: {key}] {meta.get('description', '')}\n[dir: {path.parent}]\n\n{body}"
+
+
+# ── Compactación de contexto: SÓLO cuando el historial pasa el umbral (tareas
+#    largas). En lo cotidiano nunca se dispara — overhead cero. ──
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    total = 0
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            total += len(c)
+        for tc in m.get("tool_calls") or []:
+            try: total += len(json.dumps(tc, default=str))
+            except Exception: pass
+    return total // 4
+
+
+def _static_summary(middle: list[dict]) -> str:
+    """Resumen determinístico (sin modelo) — fallback si la compactación con
+    modelo falla. Conserva acciones de tools, archivos tocados y errores."""
+    actions, files, errors = [], set(), []
+    for m in middle:
+        content = (m.get("content") or "")
+        for tc in m.get("tool_calls") or []:
+            fn = (tc.get("function") or {}).get("name", "")
+            if fn: actions.append(fn)
+        if m.get("role") == "tool" and content.lstrip().startswith("ERROR"):
+            errors.append(content.strip().split("\n", 1)[0][:120])
+        for tok in re.findall(r"(/[\w.\-/]+\.\w+)", content):
+            files.add(tok)
+    parts = []
+    if actions: parts.append("Acciones: " + ", ".join(actions[:30]))
+    if files:   parts.append("Archivos: " + ", ".join(sorted(files)[:20]))
+    if errors:  parts.append("Errores: " + " | ".join(errors[:6]))
+    return "\n".join(parts) or "(turnos previos sin acciones registrables)"
+
+
+_COMPACT_SYS = ("Sos un compactador de contexto. Resumí los turnos de abajo en un checkpoint "
+                "compacto y CONCRETO. Escribí en el idioma del usuario. NO incluyas claves, "
+                "tokens ni contraseñas — reemplazalas por [REDACTED]. Devolvé sólo el resumen, sin saludo.")
+
+_COMPACT_TEMPLATE = """Resumí estos turnos previos con este formato exacto, conservando datos concretos (paths, comandos, outputs, errores, decisiones):
+
+## Tarea activa
+[el pedido más reciente del usuario que todavía no se cerró]
+## Objetivo
+[qué se intenta lograr en general]
+## Hecho
+[lista numerada de acciones completadas — N. ACCIÓN objetivo → resultado]
+## Estado actual
+[archivos modificados, qué corre, en qué punto quedó]
+## Pendiente / bloqueos
+[lo que falta y errores sin resolver, con el mensaje exacto]
+## Datos críticos
+[valores, paths, URLs, credenciales→[REDACTED], decisiones técnicas y su porqué]
+
+--- TURNOS ---
+{transcript}
+--- FIN ---"""
+
+
+async def _summarize_history(cfg: dict, middle: list[dict]) -> str | None:
+    lines = []
+    for m in middle:
+        role = m.get("role", "?")
+        content = (m.get("content") or "").strip()
+        for tc in m.get("tool_calls") or []:
+            fn = (tc.get("function") or {}).get("name", "")
+            ar = (tc.get("function") or {}).get("arguments", "")
+            lines.append(f"[assistant→tool] {fn}({str(ar)[:200]})")
+        if content:
+            lines.append(f"[{role}] {content[:1200]}")
+    transcript = "\n".join(lines)[:24000]
+    summary_msgs = [
+        {"role": "system", "content": _COMPACT_SYS},
+        {"role": "user", "content": _COMPACT_TEMPLATE.format(transcript=transcript)},
+    ]
+    text = ""
+    try:
+        async for ev in stream_chat(cfg, summary_msgs):
+            if ev.get("error"):
+                return None
+            if ev.get("event"):  # ignorar eventos de tool_call / status
+                continue
+            text += (ev.get("message") or {}).get("content", "") or ""
+            if ev.get("done"):
+                break
+    except Exception:
+        return None
+    return text.strip() or None
+
+
+def _sanitize_pairs(messages: list[dict]) -> list[dict]:
+    """Quita tool-results huérfanos y tool_calls sin su tool-result siguiente,
+    para que la secuencia siga válida después de compactar."""
+    out: list[dict] = []
+    for m in messages:
+        if m.get("role") == "tool":
+            prev = out[-1] if out else None
+            if not (prev and prev.get("role") == "assistant" and prev.get("tool_calls")):
+                continue  # huérfano → drop
+        out.append(m)
+    for i, m in enumerate(out):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            nxt = out[i + 1] if i + 1 < len(out) else None
+            if not (nxt and nxt.get("role") == "tool"):
+                m2 = dict(m); m2.pop("tool_calls", None); out[i] = m2
+    return out
+
+
+async def _maybe_compact(cfg: dict, messages: list[dict]) -> None:
+    """Si el historial superó el umbral, reemplaza el medio por un checkpoint y
+    re-inyecta el plan vigente. No-op si está por debajo del umbral."""
+    if not cfg.get("compact_enabled", True):
+        return
+    if _estimate_tokens(messages) < cfg.get("compact_threshold_tokens", 16000):
+        return
+    head_n = 0
+    while head_n < len(messages) and messages[head_n].get("role") == "system":
+        head_n += 1
+    head_n = min(head_n + 2, len(messages))
+    keep_tail = cfg.get("compact_keep_tail_tokens", 6000)
+    acc, tail_start = 0, len(messages)
+    for i in range(len(messages) - 1, head_n - 1, -1):
+        acc += len(messages[i].get("content") or "") // 4
+        tail_start = i
+        if acc >= keep_tail:
+            break
+    while tail_start < len(messages) and messages[tail_start].get("role") == "tool":
+        tail_start += 1
+    middle = messages[head_n:tail_start]
+    if len(middle) < 4:
+        return
+    summary = await _summarize_history(cfg, middle) or _static_summary(middle)
+    new_msgs = messages[:head_n] + [{
+        "role": "system", "_compaction": True,
+        "content": ("[CHECKPOINT — la conversación se comprimió para no perder el hilo en esta "
+                    "tarea larga. Abajo está lo que pasó antes; seguí desde el final.]\n\n" + summary),
+    }]
+    if _TODOS:
+        new_msgs.append({"role": "system", "_compaction": True,
+                         "content": "Plan vigente:\n" + _render_todos(_TODOS)})
+    new_msgs += messages[tail_start:]
+    messages[:] = _sanitize_pairs(new_msgs)
+    cprint("  · contexto comprimido (tarea larga) — checkpoint guardado", C.GRAY)
+
+
+def system_prompt_with_skills() -> str:
+    """STATIC_SYSTEM_PROMPT + catálogo de skills instaladas (si hay)."""
+    sk = get_skills()
+    if not sk:
+        return STATIC_SYSTEM_PROMPT
+    cat = "\n".join(f"  · {n} — {m.get('description', '')}" for n, (m, _b, _p) in sorted(sk.items()))
+    return (STATIC_SYSTEM_PROMPT +
+            "\n\n# SKILLS INSTALADAS (cargables on-demand SÓLO si son relevantes)\n"
+            "El usuario instaló skills (paquetes de instrucciones). Si una aplica al pedido, "
+            "cargala con `skill_view(name)` y seguí sus pasos. Si ninguna aplica, ignoralas.\n" + cat)
+
+
+# ───────────────────── Sub-agentes — nativo LOUD ─────────────────────
+# LOUD puede delegar una sub-tarea acotada a un sub-agente focalizado que corre
+# su propio loop con TODAS las tools y devuelve sólo el resultado final, sin
+# contaminar el contexto principal. Útil para investigar/armar algo en paralelo
+# conceptual sin perder el hilo de la tarea madre.
+
+_ACTIVE_CFG: dict | None = None   # cfg de la sesión viva (lo setea run_turn)
+_AGENT_DEPTH = 0                  # anti-recursión de sub-agentes
+
+
+async def _run_subagent(cfg: dict, messages: list[dict], user_text: str, max_iter: int = 30) -> str:
+    messages.append({"role": "user", "content": user_text})
+    seen: list[tuple] = []
+    for _ in range(max_iter):
+        full = ""
+        had_tool = False
+        async for ev in stream_chat(cfg, messages):
+            if ev.get("error"):
+                return f"ERROR sub-agente: {ev['error']}"
+            if ev.get("event") == "assistant_tool_call":
+                messages.append({"role": "assistant", "content": ev.get("content", "") or "",
+                                 "tool_calls": ev.get("tool_calls") or []})
+                continue
+            if ev.get("event") == "tool_call":
+                had_tool = True
+                name = ev.get("name", "")
+                a = ev.get("args") or {}
+                tcid = ev.get("tool_call_id")
+                if name == "agent":
+                    res = "ERROR: un sub-agente no puede lanzar otro sub-agente. Resolvé esta parte directo."
+                elif name in TOOL_FNS:
+                    import hashlib as _h, json as _j
+                    k = _h.md5(_j.dumps(a, sort_keys=True, default=str).encode()).hexdigest()[:12]
+                    if seen.count((name, k)) >= 2:
+                        messages.append({"role": "tool", "content": f"LOOP: {name} repetido 3×, cambiá de enfoque."})
+                        continue
+                    seen.append((name, k))
+                    dec = request_permission(cfg, name, a)
+                    if dec == "stop":
+                        return "(sub-agente detenido por el usuario)"
+                    if dec == "deny":
+                        res = f"ERROR: usuario denegó {name}"
+                    else:
+                        try:
+                            res = await TOOL_FNS[name](**a)
+                        except Exception as e:
+                            res = f"ERROR: {type(e).__name__}: {e}"
+                    cprint(f"     {C.GRAY}║ {_TOOL_DISPLAY.get(name, name)}({shorten(str(a), 50)}){C.RESET}", "")
+                else:
+                    res = f"ERROR: tool desconocida {name}"
+                tm = {"role": "tool", "content": (res or "")[:8000]}
+                if tcid:
+                    tm["tool_call_id"] = tcid
+                messages.append(tm)
+                continue
+            if ev.get("done"):
+                break
+            chunk = (ev.get("message") or {}).get("content", "")
+            if chunk:
+                full += chunk
+        if full and not had_tool:
+            messages.append({"role": "assistant", "content": full})
+            return full.strip()
+        if had_tool:
+            continue
+        return full.strip() or "(sub-agente sin respuesta)"
+    return "(sub-agente: llegó al tope de iteraciones)"
+
+
+async def tool_agent(task: str, context: str | None = None) -> str:
+    """Lanzá un sub-agente focalizado para una sub-tarea acotada. Corre su propio
+    loop con todas las tools y devuelve SOLO el resultado final. Usalo para
+    delegar una pieza (investigar algo, armar un archivo, auditar) sin llenar el
+    contexto principal. NO lo uses para tareas triviales de 1 paso."""
+    global _AGENT_DEPTH
+    if _AGENT_DEPTH >= 2:
+        return "ERROR: profundidad máxima de sub-agentes (2). Resolvé esta parte directo."
+    cfg = _ACTIVE_CFG or dict(DEFAULT_CONFIG)
+    sub_sys = ("Sos un SUB-AGENTE de LOUD con una sub-tarea acotada. Usá las tools para resolverla "
+               "de punta a punta y al terminar devolvé SOLO el resultado final, conciso y concreto "
+               "(datos, paths, conclusión) — sin pedir confirmación ni narrar tu proceso paso a paso. "
+               "Valen las mismas reglas inviolables de LOUD (no inventar output de tools, datos por tool).")
+    cprint(f"\n  {C.BRAND}╓ sub-agente{C.RESET} {C.GRAY}{shorten(task, 90)}{C.RESET}", "")
+    _AGENT_DEPTH += 1
+    try:
+        out = await _run_subagent(cfg, [{"role": "system", "content": sub_sys}],
+                                  task if not context else f"CONTEXTO:\n{context}\n\nTAREA:\n{task}")
+    finally:
+        _AGENT_DEPTH -= 1
+    cprint(f"  {C.BRAND}╙ sub-agente listo{C.RESET}", "")
+    return out
+
+
 TOOLS_SCHEMA = [
     {"type": "function", "function": {
         "name": "bash",
         "description": "Run a shell command on the LOCAL machine. The user is asked for permission for destructive operations.",
         "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+    }},
+    {"type": "function", "function": {
+        "name": "agent",
+        "description": "Spawn a focused sub-agent to handle a bounded sub-task end-to-end with full tools; it returns only the final result. Use for delegating a self-contained piece (research, build a file, audit) without cluttering the main context. Do NOT use for trivial one-step work.",
+        "parameters": {"type": "object", "properties": {
+            "task": {"type": "string", "description": "The bounded sub-task for the sub-agent."},
+            "context": {"type": "string", "description": "Optional background the sub-agent needs."},
+        }, "required": ["task"]},
+    }},
+    {"type": "function", "function": {
+        "name": "todo",
+        "description": "Track a multi-step plan as a checklist. Use ONLY for genuinely multi-step tasks (3+ steps); skip for simple one-shot requests. Pass the full list of items; set each item's status to pending/in_progress/done as you progress. merge=true updates items by id without rewriting the whole list.",
+        "parameters": {"type": "object", "properties": {
+            "todos": {"type": "array", "items": {"type": "object", "properties": {
+                "id": {"type": "string"},
+                "content": {"type": "string"},
+                "status": {"type": "string", "enum": ["pending", "in_progress", "done", "cancelled"]},
+            }}, "description": "Full plan as a list of items."},
+            "merge": {"type": "boolean", "description": "Update by id instead of replacing the whole plan."},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "skills_list",
+        "description": "List installed skills (reusable instruction packs). Call only when the user's task might match a specialized skill.",
+        "parameters": {"type": "object", "properties": {
+            "filter": {"type": "string", "description": "Optional substring filter."},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "skill_view",
+        "description": "Load the full content of an installed skill to follow its instructions. Use only when a listed skill is relevant to the task.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+        }, "required": ["name"]},
     }},
     {"type": "function", "function": {
         "name": "ssh",
@@ -2406,6 +2807,10 @@ TOOL_FNS = {
     "cult_ui_list":       tool_cult_ui_list,
     "cult_ui_get":        tool_cult_ui_get,
     "ask_oracle":         tool_ask_oracle,
+    "agent":              tool_agent,
+    "todo":               tool_todo,
+    "skills_list":        tool_skills_list,
+    "skill_view":         tool_skill_view,
     # ── GUI / browser / voice (opt-in via `loud setup gui`) ──
     "apps_list":          tool_apps_list,
     "app_open":           tool_app_open,
@@ -2617,6 +3022,31 @@ Ejemplos correctos (NOTA: estos son SOLO formato — adapta el tool y los args a
 
 Si te encontrás escribiendo "Procedo a..." o "Voy a..." sin una tool call en el mismo response, parate y emití la tool.
 
+# 🛑 REGLA INVIOLABLE #8 — NUNCA INVENTES OUTPUT DE TOOLS
+El entregable es un artefacto REAL respaldado por output real de tools — no una descripción de uno. Está TERMINANTEMENTE PROHIBIDO fabricar resultados que no produjiste de verdad:
+- NO inventes el contenido de un archivo que no leíste con `read_file`.
+- NO inventes la salida de un comando que no corriste con `bash`.
+- NO inventes el HTML/headers/JSON de una URL que no trajiste con `scrape`/`http_get`.
+- NO inventes que un test pasó, que un server arrancó, que un deploy salió bien, sin la tool que lo confirme.
+- NO simules un `● Tool(...) → ⎿ output` en prosa: las tools las ejecuta el CLI, no vos escribiendo el resultado.
+
+Si una tool falla, un paquete no existe, o la red no responde y eso bloquea el camino real: **decílo derecho y probá una alternativa** (otro gestor, otro enfoque, o preguntá el dato puntual). Reportar un bloqueo honestamente SIEMPRE es mejor que inventar un resultado. Un resultado inventado es el peor error posible — destruye la confianza del usuario en todo lo demás.
+
+# 🛑 REGLA INVIOLABLE #9 — DATOS DE LA MÁQUINA = SIEMPRE POR TOOL, NUNCA DE MEMORIA
+Hay cosas que NO se contestan de memoria ni se calculan en la cabeza — SIEMPRE se obtienen con una tool, porque dependen del estado real de ESTA máquina/momento:
+- Aritmética, hashes, checksums, base64, encoding → `bash` (`python3 -c`, `sha256sum`, `base64`).
+- Fecha/hora/timezone actual → `bash` (`date`).
+- Estado del sistema: OS, CPU, RAM, disco, puertos, procesos, versiones instaladas → `bash`.
+- Contenido / tamaño / nº de líneas de un archivo → `read_file` / `bash` (`wc -l`).
+- Estado de git: branch, diff, log, status → `bash` (`git ...`).
+- Si existe un archivo / una ruta / un binario → `ls` / `bash` (`which`, `test -e`).
+
+Tu conocimiento describe el mundo en general y al USUARIO — NO el estado vivo de la máquina donde corrés. El entorno real puede diferir de lo que asumís. Ante la duda sobre algo verificable: verificá con la tool, no adivines.
+
+# 🧭 PLAN (todo) Y SKILLS — usalos SÓLO cuando suman
+- **`todo`**: cuando la tarea es genuinamente multi-paso (3+ pasos encadenados — build → correr → verificar → arreglar), arrancá llamando `todo` con el checklist, e í marcando cada item `in_progress`/`done` a medida que avanzás. Te mantiene el foco y evita re-hacer lo ya hecho aunque el contexto se comprima. Para un pedido simple de 1 paso NO lo uses — es overhead inútil.
+- **`skills_list` / `skill_view`**: si el pedido podría matchear una skill instalada (un paquete de instrucciones reutilizable), mirá el catálogo y cargá la relevante con `skill_view(name)` ANTES de improvisar. Si ninguna aplica, ignoralas y seguí normal.
+
 # 🛑 REGLA INVIOLABLE #3 — VENTANAS EXTERNAS sólo bajo demanda explícita
 Las tools que abren ventanas / GUI fuera de la terminal (`browser_open`, `browser_click`, `browser_fill`, `browser_screenshot`, `screenshot`) SÓLO se usan cuando el usuario EXPLICITAMENTE pide abrir algo externo. Disparadores válidos:
 - "abreme …", "abrí …", "open …" (con destino: una URL, una página, el navegador)
@@ -2643,6 +3073,10 @@ Ej:
 Llamadas tipo `function call`. El CLI las ejecuta en la máquina del usuario y te muestra el resultado tipo `● Tool(args) → ⎿ output`.
 
 - `bash(cmd)` — ejecuta cualquier comando shell (sh, brew, apt, npm, pip, git, docker, curl, ssh, etc.). Podés encadenar con `&&`, `||`, `|`, `;`. Timeout 120s por default.
+- `agent(task, context?)` — lanzá un SUB-AGENTE focalizado para una sub-tarea acotada (investigar, armar un archivo, auditar). Corre su propio loop con todas las tools y devuelve sólo el resultado final, sin contaminar tu contexto. NO para tareas triviales de 1 paso.
+- `todo(todos, merge?)` — checklist de la tarea para trabajos multi-paso (3+ pasos). Pasá la lista completa de items {content, status}; marcá done a medida que avanzás. NO lo uses en pedidos simples.
+- `skills_list(filter?)` — lista skills instaladas (paquetes de instrucciones). Sólo si el pedido podría matchear una.
+- `skill_view(name)` — carga una skill para seguir sus pasos. Sólo si es relevante.
 - `read_file(path)` — lee texto local (hasta 600 líneas). Úsalo antes de editar.
 - `write_file(path, content)` — crea o sobrescribe COMPLETAMENTE. Requiere permiso.
 - `edit_file(path, old, new)` — reemplazá el primer match único de `old` por `new`. `old` debe ser único en el archivo (incluí contexto si hace falta). Requiere permiso.
@@ -3052,6 +3486,74 @@ async def cmd_login(cfg: dict, identifier: str | None = None, password: str | No
 async def cmd_logout() -> None:
     clear_auth()
     cprint("  ✓ sesión cerrada", C.GREEN)
+
+
+async def cmd_connect(cfg: dict) -> int:
+    """⚡ LOUD CONNECT — menú para enchufar motores de IA. LOUD puede correr con
+    su propio cloud/local, o con CUALQUIER endpoint OpenAI-compatible (su propio
+    endpoint, Groq, etc.). Expansión nativa de LOUD."""
+    while True:
+        provs = cfg.get("providers", []) or []
+        cprint("\n  ⚡ LOUD CONNECT — motores de IA", C.BRAND, bold=True)
+        cprint(f"     engine actual: {cfg.get('mode','cloud')}"
+               f"{'  ·  proveedor: ' + cfg.get('active_provider','') if cfg.get('mode')=='custom' else ''}", C.GRAY)
+        if provs:
+            cprint("     proveedores guardados:", C.GRAY)
+            for i, p in enumerate(provs, 1):
+                star = "★" if (cfg.get("mode") == "custom" and p.get("name") == cfg.get("active_provider")) else "·"
+                cprint(f"        {star} [{i}] {p.get('name')}  —  {p.get('model','?')}  @  {p.get('base_url','')}", C.GRAY)
+        cprint("     opciones:", C.GRAY)
+        cprint("        [a] agregar proveedor (cualquier endpoint OpenAI-compatible)", C.GRAY)
+        cprint("        [u] usar un proveedor guardado", C.GRAY)
+        cprint("        [d] borrar un proveedor", C.GRAY)
+        cprint("        [c] LOUD cloud    [l] LOUD local    [q] salir", C.GRAY)
+        cprint("     → ", C.BRAND, bold=True, end="")
+        try:
+            ch = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if ch in ("q", ""):
+            break
+        elif ch == "c":
+            cfg["mode"] = "cloud"; save_config(cfg); cprint("  · engine → LOUD cloud", C.GREEN); break
+        elif ch == "l":
+            cfg["mode"] = "local"; save_config(cfg); cprint("  · engine → LOUD local", C.GREEN); break
+        elif ch == "a":
+            cprint("     nombre (ej: mi-loud, groq): ", C.BRAND, bold=True, end=""); name = input().strip()
+            cprint("     base URL (ej: https://api.loud.codes/v1): ", C.BRAND, bold=True, end=""); base = input().strip()
+            cprint("     API key: ", C.BRAND, bold=True, end=""); key = input().strip()
+            cprint("     modelo (ej: loud-pro): ", C.BRAND, bold=True, end=""); model = input().strip() or "loud-pro"
+            if name and base:
+                provs = [p for p in provs if p.get("name") != name]
+                provs.append({"name": name, "base_url": base, "api_key": key, "model": model})
+                cfg["providers"] = provs; cfg["active_provider"] = name; cfg["mode"] = "custom"; save_config(cfg)
+                cprint(f"  · '{name}' agregado y activado · engine → custom", C.GREEN)
+            else:
+                cprint("  · faltó nombre o URL", C.YELLOW)
+        elif ch == "u":
+            if not provs:
+                cprint("  · no hay proveedores; agregá con [a]", C.YELLOW); continue
+            cprint("     número: ", C.BRAND, bold=True, end="")
+            try:
+                p = provs[int(input().strip()) - 1]
+                cfg["active_provider"] = p["name"]; cfg["mode"] = "custom"; save_config(cfg)
+                cprint(f"  · engine → custom · {p['name']} ({p.get('model')})", C.GREEN); break
+            except Exception:
+                cprint("  · número inválido", C.YELLOW)
+        elif ch == "d":
+            if not provs:
+                cprint("  · no hay proveedores", C.YELLOW); continue
+            cprint("     número a borrar: ", C.BRAND, bold=True, end="")
+            try:
+                idx = int(input().strip()) - 1
+                gone = provs.pop(idx)
+                cfg["providers"] = provs
+                if cfg.get("active_provider") == gone.get("name"):
+                    cfg["active_provider"] = ""; cfg["mode"] = "cloud"
+                save_config(cfg); cprint(f"  · borrado '{gone.get('name')}'", C.YELLOW)
+            except Exception:
+                cprint("  · número inválido", C.YELLOW)
+    return 0
 
 
 async def cmd_setup_gui(cfg: dict) -> int:
@@ -3515,12 +4017,96 @@ async def _stream_chat_cloud(cfg: dict, messages: list[dict]):
         yield {"error": f"network: {type(e).__name__}: {e}"}
 
 
+def _active_provider(cfg: dict) -> dict | None:
+    """El proveedor custom activo (o el primero guardado)."""
+    name = cfg.get("active_provider")
+    provs = cfg.get("providers", []) or []
+    for p in provs:
+        if p.get("name") == name:
+            return p
+    return provs[0] if provs else None
+
+
+async def _stream_chat_custom(cfg: dict, messages: list[dict]):
+    """Habla con CUALQUIER endpoint OpenAI-compatible guardado vía `loud connect`
+    (el propio endpoint de LOUD, Groq, etc.). Convierte el streaming OpenAI
+    (`data: {choices:[{delta}]}`) a los mismos eventos que el resto del loop usa."""
+    prov = _active_provider(cfg)
+    if not prov:
+        yield {"error": "no hay proveedor configurado. Corré: loud connect"}
+        return
+    base = (prov.get("base_url") or "").rstrip("/")
+    url = base if base.endswith("/chat/completions") else base + "/chat/completions"
+    model = prov.get("model") or cfg.get("model") or "loud-pro"
+    clean = [{k: v for k, v in m.items() if k in ("role", "content", "tool_calls", "tool_call_id", "name")}
+             for m in messages]
+    payload = {"model": model, "messages": clean, "tools": TOOLS_SCHEMA, "stream": True}
+    headers = {"Authorization": f"Bearer {prov.get('api_key','')}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=600.0, write=600.0, pool=None)) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as r:
+                if r.status_code >= 400:
+                    body = await r.aread()
+                    yield {"error": f"proveedor {r.status_code}: {body.decode(errors='replace')[:200]}"}
+                    return
+                acc: dict = {}   # index → {id, name, arguments}
+                async for line in r.aiter_lines():
+                    line = (line or "").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        j = json.loads(data)
+                    except Exception:
+                        continue
+                    ch = (j.get("choices") or [{}])[0]
+                    delta = ch.get("delta") or {}
+                    if delta.get("content"):
+                        yield {"message": {"content": delta["content"]}, "done": False}
+                    for tc in delta.get("tool_calls") or []:
+                        idx = tc.get("index", 0)
+                        slot = acc.setdefault(idx, {"id": None, "name": "", "arguments": ""})
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["arguments"] += fn["arguments"]
+                    if ch.get("finish_reason") and acc:
+                        tcs = []
+                        for i in sorted(acc):
+                            s = acc[i]
+                            tcs.append({"id": s["id"] or f"call_{i}", "type": "function",
+                                        "function": {"name": s["name"], "arguments": s["arguments"]}})
+                        yield {"event": "assistant_tool_call", "content": "", "tool_calls": tcs}
+                        for i in sorted(acc):
+                            s = acc[i]
+                            try:
+                                a = json.loads(s["arguments"] or "{}")
+                            except Exception:
+                                a = {}
+                            yield {"event": "tool_call", "name": s["name"], "args": a,
+                                   "tool_call_id": s["id"] or f"call_{i}"}
+                        acc = {}
+                yield {"done": True}
+    except Exception as e:
+        yield {"error": f"network: {type(e).__name__}: {e}"}
+
+
 async def stream_chat(cfg: dict, messages: list[dict]):
-    """Route the chat through local Ollama or the cloud API based on cfg.mode.
-    - mode=local → only local Ollama (fast, this machine's compute, no RAG)
-    - mode=auto  → probe local first; if it's not ready, fall back to cloud
-    - mode=cloud → original behavior (full brain on server)"""
+    """Route the chat through local Ollama, the cloud API, or a custom provider.
+    - mode=local  → only local Ollama (fast, this machine's compute, no RAG)
+    - mode=auto   → probe local first; if it's not ready, fall back to cloud
+    - mode=cloud  → original behavior (full brain on server)
+    - mode=custom → any OpenAI-compatible endpoint saved via `loud connect`"""
     mode = cfg.get("mode", "cloud")
+    if mode == "custom":
+        async for ev in _stream_chat_custom(cfg, messages):
+            yield ev
+        return
     if mode == "local":
         ok, info = await _ollama_local_ready(cfg)
         if not ok:
@@ -3661,6 +4247,10 @@ _TOOL_LABEL = {
     "grep":            "Searching",
     "ls":              "Listing",
     "http_get":        "Fetching",
+    "agent":              "Delegating",
+    "todo":               "Planning",
+    "skills_list":        "Listing-skills",
+    "skill_view":         "Loading-skill",
     "ask_oracle":         "Consulting",
     "apps_list":          "Listing-apps",
     "app_open":           "Launching",
@@ -3691,6 +4281,10 @@ _TOOL_DISPLAY = {
     "grep":               "Search",
     "ls":                 "List",
     "http_get":           "Fetch",
+    "agent":              "Agent",
+    "todo":               "Plan",
+    "skills_list":        "Skills",
+    "skill_view":         "Skill",
     "ask_oracle":         "Oracle",
     "apps_list":          "AppsList",
     "app_open":           "AppOpen",
@@ -3824,7 +4418,13 @@ class LoadingSpinner:
 
 async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
     import random
+    global _ACTIVE_CFG
+    _ACTIVE_CFG = cfg   # los sub-agentes heredan el motor/config de la sesión viva
     messages.append({"role": "user", "content": user_text})
+
+    # Compactá el historial ANTES de mandar, sólo si es una sesión larga que
+    # pasó el umbral. En tareas cotidianas es no-op (overhead cero).
+    await _maybe_compact(cfg, messages)
 
     spinner = LoadingSpinner()
 
@@ -4250,6 +4850,9 @@ SLASH_HELP = """\
                     · loud-2.0 (qwen 32b · LOUD 2.0 GPU only)
                     · loud-eye (qwen2-vl · imágenes/screenshots)
 /tools              lista las tools que el agente puede llamar
+/connect            ⚡ LOUD Connect — enchufá cualquier motor de IA (OpenAI-compat)
+/skills [filtro]    lista las skills instaladas (~/.loud/skills/<n>/SKILL.md)
+/skill NOMBRE       carga e imprime una skill
 /permissions        muestra/cambia el modo de permisos (ask/yolo/safe)
 /mode MODE          motor de inferencia: cloud · local · auto
                     · cloud = api.loud.codes (full brain + RAG)
@@ -4272,7 +4875,7 @@ SLASH_COMMANDS = {
     "/exit", "/quit", "/help", "/reset", "/model", "/tools",
     "/permissions", "/mode", "/setup", "/brain", "/cwd",
     "/login", "/logout", "/whoami", "/version", "/update",
-    "/save", "/open",
+    "/save", "/open", "/skills", "/skill", "/connect",
 }
 
 _PATH_ROOT_PREFIXES = (
@@ -4305,7 +4908,9 @@ async def repl(cfg: dict) -> None:
     """Fresh REPL launch — generates a new chat_id, renders the banner, and
     drops the user into an interactive loop with an empty conversation."""
     import uuid as _uuid
-    messages = [{"role": "system", "content": STATIC_SYSTEM_PROMPT}]
+    _TODOS.clear()
+    get_skills(refresh=True)
+    messages = [{"role": "system", "content": system_prompt_with_skills()}]
     cfg["_chat_id"] = f"repl-{_uuid.uuid4().hex[:12]}"
     # Wipe any stale session file from a pre-0.8.4 install.
     if SESSION_FILE.exists():
@@ -4318,7 +4923,7 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
     """The interactive loop, factored out so one-shot prompts can seed the
     history and then drop into the REPL without re-rendering the banner."""
     import uuid as _uuid
-    sys_prompt = STATIC_SYSTEM_PROMPT
+    sys_prompt = system_prompt_with_skills()
     if render_initial_banner:
         sys.stdout.write(render_banner(cfg))
         sys.stdout.flush()
@@ -4354,9 +4959,21 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
                 cprint(SLASH_HELP.format(model=cfg["model"]), C.BRAND)
             elif cmd == "/reset":
                 reset_session()
+                _TODOS.clear()
+                sys_prompt = system_prompt_with_skills()
                 messages = [{"role": "system", "content": sys_prompt}]
                 cfg["_chat_id"] = f"repl-{_uuid.uuid4().hex[:12]}"
                 cprint("  · historial borrado · chat aislado nuevo", C.YELLOW)
+            elif cmd == "/connect":
+                await cmd_connect(cfg)
+            elif cmd == "/skills":
+                get_skills(refresh=True)
+                cprint(await tool_skills_list(arg or None), C.BRAND)
+            elif cmd == "/skill":
+                if not arg:
+                    cprint("  · uso: /skill <nombre>", C.YELLOW)
+                else:
+                    cprint(await tool_skill_view(arg), C.GRAY)
             elif cmd == "/model":
                 if arg:
                     cfg["model"] = arg
@@ -4564,8 +5181,10 @@ async def main_async(args: argparse.Namespace) -> int:
         save_config(cfg)
 
     # Subcommands
-    if args.question and args.question[0] in ("login", "logout", "whoami", "update", "version", "setup", "mode"):
+    if args.question and args.question[0] in ("login", "logout", "whoami", "update", "version", "setup", "mode", "connect"):
         sub = args.question[0]
+        if sub == "connect":
+            return await cmd_connect(cfg)
         if sub == "login":
             ok = await cmd_login(cfg)
             return 0 if ok else 1
@@ -4613,7 +5232,7 @@ async def main_async(args: argparse.Namespace) -> int:
         # back into the old one-shot-and-quit behavior (CI / scripts).
         import uuid as _uuid
         cfg["_chat_id"] = f"repl-{_uuid.uuid4().hex[:12]}"
-        messages = [{"role": "system", "content": STATIC_SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": system_prompt_with_skills()}]
         sys.stdout.write(render_banner(cfg))
         sys.stdout.flush()
         cprint(f"loud❯ {' '.join(args.question)}", C.BRAND, bold=True)
