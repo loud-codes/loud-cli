@@ -33,9 +33,8 @@
 <meta name="twitter:image" content="https://loud.codes/og.svg">
 
 <!-- Icons -->
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="apple-touch-icon" href="/favicon.svg">
-<link rel="mask-icon" href="/favicon.svg" color="#a2cd65">
+<link rel="icon" type="image/png" href="/favicon.png?v=3">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3">
 <style>
 :root{
   --bg:#0a0a0a; --panel:#13131a; --panel-2:#1a1a23;
@@ -1331,11 +1330,12 @@ button:focus-visible,a:focus-visible{
   <span class="lc-letter">L</span>
 </div>
 <style>
+  #loud-cursor{display:none}
   @media (hover: hover) and (pointer: fine){
     body{cursor:none}
     a,button,[role="button"],input,textarea,select,label{cursor:none !important}
     #loud-cursor{
-      position:fixed;top:0;left:0;width:0;height:0;pointer-events:none;
+      display:block;position:fixed;top:0;left:0;width:0;height:0;pointer-events:none;
       z-index:99999;transform:translate3d(-100px,-100px,0);
       transition:opacity 200ms ease;mix-blend-mode:normal;
     }
@@ -1534,7 +1534,7 @@ button:focus-visible,a:focus-visible{
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.475 2 2 6.475 2 12a9.994 9.994 0 006.838 9.488c.5.087.687-.213.687-.476 0-.237-.013-1.024-.013-1.862-2.512.463-3.162-.612-3.362-1.175-.113-.288-.6-1.175-1.025-1.413-.35-.187-.85-.65-.013-.662.788-.013 1.35.725 1.538 1.025.9 1.512 2.338 1.087 2.912.825.088-.65.35-1.087.638-1.337-2.225-.25-4.55-1.113-4.55-4.938 0-1.088.388-1.987 1.025-2.687-.1-.25-.45-1.275.1-2.65 0 0 .837-.263 2.75 1.025a9.28 9.28 0 012.5-.338c.85 0 1.7.113 2.5.338 1.912-1.3 2.75-1.025 2.75-1.025.55 1.375.2 2.4.1 2.65.637.7 1.025 1.587 1.025 2.687 0 3.838-2.337 4.688-4.562 4.938.362.312.675.912.675 1.85 0 1.337-.013 2.412-.013 2.75 0 .263.188.575.688.475A10.005 10.005 0 0022 12c0-5.525-4.475-10-10-10z"/></svg>
       <span data-i18n="term.github">Ver código en GitHub</span>
     </a>
-    <span class="term-version" id="term-version">v0.3.0</span>
+    <span class="term-version" id="term-version">v1.6.15</span>
   </div>
 </div>
 
@@ -1667,6 +1667,10 @@ button:focus-visible,a:focus-visible{
   <button class="item admin-only" data-view="api-keys">
     <svg class="icon" viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
     <span>API Keys</span>
+  </button>
+  <button class="item" data-view="connect">
+    <svg class="icon" viewBox="0 0 24 24"><path d="M5 12h6m2 0h6M9 9v6m6-6v6M5 9a2 2 0 012-2h10a2 2 0 012 2v6a2 2 0 01-2 2H7a2 2 0 01-2-2z"/></svg>
+    <span data-i18n="sb.agents">Agentes</span>
   </button>
 </aside>
 
@@ -1824,7 +1828,7 @@ button:focus-visible,a:focus-visible{
       <button id="user-create-btn">+ Create user</button>
     </div>
     <table>
-      <thead><tr><th>ID</th><th>Email</th><th>Name</th><th>Role</th><th>Active</th><th>Created</th><th>Actions</th></tr></thead>
+      <thead><tr><th>ID</th><th>Email</th><th>Name</th><th>Role</th><th>Plan</th><th>Active</th><th>Created</th><th>Actions</th></tr></thead>
       <tbody id="users-tbody"></tbody>
     </table>
   </section>
@@ -2032,6 +2036,38 @@ button:focus-visible,a:focus-visible{
     <table>
       <thead><tr><th>Nombre</th><th>Prefix</th><th>Creada</th><th>Último uso</th><th>Estado</th><th></th></tr></thead>
       <tbody id="apikeys-tbody"></tbody>
+    </table>
+  </section>
+
+  <section id="connect-section" class="section">
+    <div class="section-header">
+      <h1 data-i18n="agents.title">Agentes</h1>
+      <span class="spacer"></span>
+    </div>
+    <div data-i18n="agents.info" style="background:var(--bg-soft);border:1px solid var(--border);border-radius:8px;padding:14px;color:var(--muted);font-size:12.5px;line-height:1.55;margin-bottom:18px">
+      Conectá agentes / modelos externos — los proveedores más conocidos (OpenAI-compatible). Una vez conectado, aparece en el selector de modelo del chat y lo usás ahí mismo.
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:18px">
+      <select id="prov-provider" style="flex:1.5;min-width:200px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--fg);font-size:13px">
+        <option value="" data-i18n="agents.pick">— Elegí un proveedor —</option>
+        <option value="OpenAI"        data-url="https://api.openai.com/v1"                          data-model="gpt-4o-mini">OpenAI (GPT)</option>
+        <option value="Google Gemini" data-url="https://generativelanguage.googleapis.com/v1beta/openai" data-model="gemini-2.0-flash">Google Gemini</option>
+        <option value="Groq"          data-url="https://api.groq.com/openai/v1"                    data-model="llama-3.3-70b-versatile">Groq</option>
+        <option value="xAI Grok"      data-url="https://api.x.ai/v1"                                data-model="grok-2-latest">xAI (Grok)</option>
+        <option value="DeepSeek"      data-url="https://api.deepseek.com"                           data-model="deepseek-chat">DeepSeek</option>
+        <option value="Mistral"       data-url="https://api.mistral.ai/v1"                          data-model="mistral-large-latest">Mistral</option>
+        <option value="OpenRouter"    data-url="https://openrouter.ai/api/v1"                       data-model="openai/gpt-4o-mini">OpenRouter</option>
+        <option value="Together AI"   data-url="https://api.together.xyz/v1"                        data-model="meta-llama/Llama-3.3-70B-Instruct-Turbo">Together AI</option>
+        <option value="Perplexity"    data-url="https://api.perplexity.ai"                          data-model="sonar">Perplexity</option>
+        <option value="Fireworks AI"  data-url="https://api.fireworks.ai/inference/v1"              data-model="accounts/fireworks/models/llama-v3p3-70b-instruct">Fireworks AI</option>
+      </select>
+      <input id="prov-key"   placeholder="API key" type="password" style="flex:1;min-width:160px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--fg);font-size:13px">
+      <input id="prov-model" data-i18n-placeholder="agents.model" placeholder="Modelo" style="flex:1;min-width:150px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--fg);font-size:13px">
+      <button id="prov-add-btn" data-i18n="agents.add">+ Conectar agente</button>
+    </div>
+    <table>
+      <thead><tr><th>Nombre</th><th>Endpoint</th><th>Modelo</th><th>Tipo</th><th></th></tr></thead>
+      <tbody id="providers-tbody"></tbody>
     </table>
   </section>
 
@@ -2272,6 +2308,13 @@ const I18N = {
     "sb.invites": "Códigos de invitación",
     "sb.knowledge": "Conocimiento",
     "sb.brain": "Estado del cerebro",
+    "sb.agents": "Agentes",
+    "agents.title": "Agentes",
+    "agents.info": "Conectá agentes / modelos externos — los proveedores más conocidos (OpenAI-compatible). Una vez conectado, aparece en el selector de modelo del chat y lo usás ahí mismo.",
+    "agents.pick": "— Elegí un proveedor —",
+    "agents.model": "Modelo",
+    "agents.add": "+ Conectar agente",
+    "agents.connected": "Agentes conectados",
     "group.today": "Hoy",
     "group.yesterday": "Ayer",
     "group.week": "Últimos 7 días",
@@ -2399,6 +2442,13 @@ const I18N = {
     "sb.invites": "Invite codes",
     "sb.knowledge": "Knowledge",
     "sb.brain": "Brain status",
+    "sb.agents": "Agents",
+    "agents.title": "Agents",
+    "agents.info": "Connect external agents / models — the best-known OpenAI-compatible providers. Once connected, it shows up in the chat's model picker and you use it right there.",
+    "agents.pick": "— Pick a provider —",
+    "agents.model": "Model",
+    "agents.add": "+ Connect agent",
+    "agents.connected": "Connected agents",
     "group.today": "Today",
     "group.yesterday": "Yesterday",
     "group.week": "Last 7 days",
@@ -2502,6 +2552,10 @@ function showApp(){
   $("#me-role").textContent = auth.user.role;
   $("#sidebar").classList.toggle("is-admin", auth.user.role === "admin");
   setView("chat");
+  // Honor un #<sección> presente en la URL al cargar (ej: abrir /#api-keys directo).
+  const _initSection = (location.hash || "").replace(/^#/, "");
+  if (["users","invites","knowledge","brain-status","pending-chunks","api-keys","connect","memories"].includes(_initSection)) setView(_initSection);
+  try { loadProviders(); } catch(_){}   // poblar el selector de modelo con los agentes conectados
   if (auth.user.role === "admin") {
     try { startActivityFeed(); } catch (_) {}
     try { startLiveChunkStats(); } catch (_) {}
@@ -2721,7 +2775,19 @@ function setView(view){
   if (view === "brain-status") loadBrainStatus();
   if (view === "pending-chunks") loadPendingChunks();
   if (view === "api-keys") loadApiKeys();
+  if (view === "connect") loadProviders();
   if (view === "memories") loadMemories();
+  // ── URL hash routing por sección: cada vista refleja su #fragmento en la
+  //    barra de direcciones (igual que los chats con #c/<id>). El chat conserva
+  //    su propio #c/<id>; las demás secciones usan #<view>. ──
+  if (view === "chat"){
+    const _a = (typeof getActiveChat === "function") ? getActiveChat() : null;
+    if (_a && _a.id) _setChatHash(_a.id, true);
+    else if (location.hash && !location.hash.startsWith("#c/")) history.replaceState(null, "", "#");
+  } else {
+    const _t = "#" + view;
+    if (location.hash !== _t) history.pushState(null, "", _t);
+  }
 }
 $$(".sidebar .item").forEach(b => b.onclick = () => setView(b.dataset.view));
 
@@ -3093,8 +3159,10 @@ async function hydrateChatsFromServer(){
       const active = getActiveChat();
       loadChatIntoLog(active);
       // Reflect the actual active chat in the URL on first load (replaceState
-      // so the user can't go "back" into a non-chat URL state).
-      if (active && active.id) _setChatHash(active.id, true);
+      // so the user can't go "back" into a non-chat URL state). Pero NO pisar
+      // un #<sección> si la URL apunta a una vista admin (api-keys, users, …).
+      const _h = location.hash || "";
+      if (active && active.id && (!_h || _h.startsWith("#c/"))) _setChatHash(active.id, true);
     }
   } catch (e) {
     console.warn("chat hydrate failed:", e?.message || e);
@@ -3350,13 +3418,25 @@ function startNewChat(){
 }
 
 // Honor #c/<id> on page load + on back/forward.
+const _HASH_VIEWS = ["chat","users","invites","knowledge","brain-status","pending-chunks","api-keys","connect","memories"];
 window.addEventListener("hashchange", () => {
   const id = _chatIdFromHash();
-  if (id && chatStore.get(id) && chatStore.active() !== id) {
-    chatStore.setActive(id);
-    const chat = chatStore.get(id);
-    if (chat) loadChatIntoLog(chat);
-    renderChatSidebar();
+  if (id){
+    if (chatStore.get(id) && chatStore.active() !== id) {
+      chatStore.setActive(id);
+      const chat = chatStore.get(id);
+      if (chat) loadChatIntoLog(chat);
+      renderChatSidebar();
+    }
+    const cur = $(".sidebar .item.active");
+    if (!cur || cur.dataset.view !== "chat") setView("chat");
+    return;
+  }
+  // Sección admin: #<view> → cambiar a esa vista (back/forward o URL pegada).
+  const v = (location.hash || "").replace(/^#/, "");
+  if (v && _HASH_VIEWS.includes(v)){
+    const cur = $(".sidebar .item.active");
+    if (!cur || cur.dataset.view !== v) setView(v);
   }
 });
 
@@ -3385,14 +3465,19 @@ function applyActiveModelUI() {
 }
 applyActiveModelUI();
 
-$$(".model-opt", modelMenu).forEach(opt => opt.addEventListener("click", (e) => {
-  e.stopPropagation();
+function _selectModelOpt(opt){
   if (opt.dataset.disabled === "1") return;
-  activeModel = { name: opt.querySelector(".ttl").firstChild.textContent.trim(), backend: opt.dataset.backend };
+  const ttl = opt.querySelector(".ttl");
+  const nm = ttl ? ttl.firstChild.textContent.trim() : (opt.dataset.model || opt.dataset.backend);
+  activeModel = { name: nm, backend: opt.dataset.backend };
   try { localStorage.setItem("loud.activeModel", JSON.stringify(activeModel)); } catch {}
   applyActiveModelUI();
   modelMenu.classList.remove("open");
-}));
+}
+function bindModelOpts(){
+  $$(".model-opt", modelMenu).forEach(opt => { opt.onclick = (e) => { e.stopPropagation(); _selectModelOpt(opt); }; });
+}
+bindModelOpts();
 
 function _escHtml(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function renderMd(text){
@@ -4216,19 +4301,37 @@ ragPill.onclick = () => {
 $$(".lang-btn").forEach(b => b.onclick = () => setLang(b.dataset.lang));
 
 async function loadUsers(){
-  const tb = $("#users-tbody"); tb.innerHTML = `<tr class="empty-row"><td colspan="7">loading…</td></tr>`;
+  const tb = $("#users-tbody"); tb.innerHTML = `<tr class="empty-row"><td colspan="8">loading…</td></tr>`;
   try {
     const users = await api("/v1/users");
-    tb.innerHTML = users.map(u => `
-      <tr>
+    tb.innerHTML = users.map(u => {
+      const isAdmin = u.role === "admin";
+      const isPro = u.plan === "pro";
+      // Plan: admins no tienen plan (acceso total). Los demás → toggle Free/Pro.
+      const planCell = isAdmin
+        ? `<span class="pill" style="opacity:.5">—</span>`
+        : `<button onclick="setUserPlan(${u.id}, '${isPro?"free":"pro"}')" title="${isPro?"Quitar Pro":"Activar Pro"}" style="cursor:pointer;border:1px solid ${isPro?"rgba(162,205,101,.4)":"var(--border)"};background:${isPro?"rgba(162,205,101,.14)":"transparent"};color:${isPro?"var(--accent)":"var(--muted)"};border-radius:999px;padding:2px 10px;font-size:11px;font-weight:600">${isPro?"★ Pro":"Free"}</button>`;
+      const roleCell = `<button onclick="setUserRole(${u.id}, '${isAdmin?"user":"admin"}')" title="cambiar rol" style="cursor:pointer;background:none;border:none;padding:0"><span class="pill ${isAdmin?"pill-accent":""}">${u.role}</span></button>`;
+      return `<tr>
         <td>${u.id}</td><td>${u.email}</td><td>${u.name||""}</td>
-        <td><span class="pill ${u.role==="admin"?"pill-accent":""}">${u.role}</span></td>
+        <td>${roleCell}</td>
+        <td>${planCell}</td>
         <td><span class="pill ${u.active?"pill-green":"pill-red"}">${u.active?"yes":"no"}</span></td>
         <td style="color:var(--muted);font-size:12px">${_fmtDateTime(u.created_at)}</td>
-        <td><button class="danger" onclick="resetUserPassword(${u.id})">reset pass</button>${u.id!==auth.user.id?`<button class="danger" onclick="deleteUser(${u.id})">delete</button>`:""}</td>
-      </tr>`).join("");
-  } catch (ex) { tb.innerHTML = `<tr class="empty-row"><td colspan="7" style="color:var(--red)">${ex.message}</td></tr>`; }
+        <td style="display:flex;gap:6px"><button class="danger" onclick="resetUserPassword(${u.id})">reset pass</button>${u.id!==auth.user.id?`<button class="danger" onclick="deleteUser(${u.id})">delete</button>`:""}</td>
+      </tr>`;
+    }).join("");
+  } catch (ex) { tb.innerHTML = `<tr class="empty-row"><td colspan="8" style="color:var(--red)">${ex.message}</td></tr>`; }
 }
+window.setUserPlan = async (id, plan) => {
+  try { await api(`/v1/users/${id}/plan`, {method:"PUT", body:{plan}}); toast(plan==="pro"?"Pro activado ★":"Pro quitado","success"); loadUsers(); }
+  catch(e){ toast(e.message,"error"); }
+};
+window.setUserRole = async (id, role) => {
+  if (!(await showConfirm("Cambiar rol", `¿Cambiar este usuario a ${role}?`, {okLabel:"Cambiar"}))) return;
+  try { await api(`/v1/users/${id}/role`, {method:"PUT", body:{role}}); toast("rol actualizado","success"); loadUsers(); }
+  catch(e){ toast(e.message,"error"); }
+};
 window.deleteUser = async (id) => {
   if (!(await showConfirm("Eliminar usuario", "¿Eliminar este usuario? Esta acción no se puede deshacer.", {danger:true, okLabel:"Eliminar"}))) return;
   await api(`/v1/users/${id}`,{method:"DELETE"}); toast("user deleted"); loadUsers();
@@ -4859,9 +4962,13 @@ async function loadApiKeys(){
         <td>${k.revoked_at
             ? '<span style="color:var(--red);font-size:11px">revocada</span>'
             : '<span style="color:var(--brand);font-size:11px">activa</span>'}</td>
-        <td>${k.revoked_at ? "" : `<button class="danger" data-revoke="${k.id}">revocar</button>`}</td>
+        <td style="display:flex;gap:6px">${k.key ? `<button data-copykey="${esc(k.key)}">copiar</button>` : ""}${k.revoked_at ? "" : `<button class="danger" data-revoke="${k.id}">revocar</button>`}</td>
       </tr>`).join("");
     tb.querySelectorAll("[data-revoke]").forEach(b => b.onclick = () => revokeApiKey(b.dataset.revoke));
+    tb.querySelectorAll("[data-copykey]").forEach(b => b.onclick = async () => {
+      try { await navigator.clipboard.writeText(b.dataset.copykey); toast("API key copiada","success"); }
+      catch(_) { toast("copiá manual: " + b.dataset.copykey, "info"); }
+    });
   } catch (e) { tb.innerHTML = `<tr><td colspan="6" style="color:var(--red)">${e.message}</td></tr>`; }
 }
 async function revokeApiKey(id){
@@ -4869,6 +4976,81 @@ async function revokeApiKey(id){
   try { await api(`/v1/admin/api-keys/${id}`, {method:"DELETE"}); toast("key revocada","success"); loadApiKeys(); }
   catch(e) { toast(e.message,"error"); }
 }
+
+// ─── Agentes / modelos externos (conectar endpoints OpenAI-compatible) ───
+function _provHost(u){ try { return new URL(u).host; } catch { return u; } }
+function renderExternalModelOpts(providers){
+  const menu = $("#model-menu"); if (!menu) return;
+  menu.querySelectorAll(".model-opt.ext, .model-opt-sep").forEach(n => n.remove());
+  if (providers && providers.length){
+    const sep = document.createElement("div");
+    sep.className = "model-opt-sep";
+    sep.style.cssText = "font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:9px 10px 4px";
+    sep.textContent = (typeof t === "function") ? t("agents.connected") : "Connected agents";
+    menu.appendChild(sep);
+    for (const p of providers){
+      const esc = s => (s||"").toString().replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+      const div = document.createElement("div");
+      div.className = "model-opt ext";
+      div.dataset.model = p.name; div.dataset.backend = "ext:" + p.id;
+      div.innerHTML = `<span class="dot"></span><div class="body"><div class="ttl">${esc(p.name)||"agente"} <span class="badge" style="background:rgba(96,165,250,.18);color:#60a5fa;border-color:rgba(96,165,250,.35)">externo</span></div><div class="desc">${esc(_provHost(p.base_url))} · ${esc(p.model)||"—"}</div></div>`;
+      menu.appendChild(div);
+    }
+  }
+  if (typeof bindModelOpts === "function") bindModelOpts();
+  if (typeof applyActiveModelUI === "function") applyActiveModelUI();
+}
+async function loadProviders(){
+  try {
+    const r = await api("/v1/providers");
+    const provs = r.providers || [];
+    const tb = $("#providers-tbody");
+    if (tb){
+      const esc = s => (s||"").toString().replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+      tb.innerHTML = provs.length ? provs.map(p => `
+        <tr>
+          <td>${esc(p.name)}</td>
+          <td style="font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted)">${esc(p.base_url)}</td>
+          <td style="font-size:12px">${esc(p.model)||"—"}</td>
+          <td style="color:var(--muted);font-size:12px">${esc(p.kind)}</td>
+          <td><button class="danger" data-delprov="${p.id}">quitar</button></td>
+        </tr>`).join("") : `<tr class="empty-row"><td colspan="5">sin agentes · conectá uno con el formulario de arriba</td></tr>`;
+      tb.querySelectorAll("[data-delprov]").forEach(b => b.onclick = () => deleteProvider(b.dataset.delprov));
+    }
+    renderExternalModelOpts(provs);
+  } catch(e){
+    const tb = $("#providers-tbody");
+    if (tb) tb.innerHTML = `<tr><td colspan="5" style="color:var(--red)">${e.message}</td></tr>`;
+  }
+}
+async function deleteProvider(id){
+  if (!(await showConfirm("Quitar agente","Se desconecta este agente externo del chat.",{danger:true, okLabel:"Quitar"}))) return;
+  try { await api(`/v1/providers/${id}`, {method:"DELETE"}); toast("agente quitado","success"); loadProviders(); }
+  catch(e){ toast(e.message,"error"); }
+}
+document.addEventListener("DOMContentLoaded", () => {
+  const sel = $("#prov-provider"), mdl = $("#prov-model");
+  if (sel) sel.onchange = () => {
+    const o = sel.options[sel.selectedIndex];
+    if (o && o.dataset.model && mdl && !mdl.value.trim()) mdl.value = o.dataset.model;
+  };
+  const ab = $("#prov-add-btn");
+  if (ab) ab.onclick = async () => {
+    const o = sel ? sel.options[sel.selectedIndex] : null;
+    if (!o || !o.value){ toast(LANG==="en"?"pick a provider":"elegí un proveedor","error"); return; }
+    const name = o.value;
+    const base_url = o.dataset.url || "";
+    const api_key = $("#prov-key").value.trim();
+    const model = (mdl.value.trim() || o.dataset.model || "");
+    if (!base_url){ toast("provider inválido","error"); return; }
+    try {
+      await api("/v1/providers", {method:"POST", body:{name, base_url, api_key, model, kind:"chat"}});
+      sel.selectedIndex = 0; $("#prov-key").value = ""; mdl.value = "";
+      toast(LANG==="en"?"agent connected":"agente conectado","success"); loadProviders();
+    } catch(e){ toast(e.message,"error"); }
+  };
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   const btn = $("#apikey-create-btn");
   if (btn) btn.onclick = async () => {

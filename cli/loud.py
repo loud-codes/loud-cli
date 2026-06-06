@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 # ───────────────────── Config ─────────────────────
 
@@ -3404,79 +3404,58 @@ def get_token() -> str:
 
 
 async def cmd_login(cfg: dict, identifier: str | None = None, password: str | None = None) -> bool:
-    """Browser-based device-flow login:
-      1. We open the browser to a verification URL with a session code
-      2. User logs in on the web (or is already logged in) and clicks "Approve"
-      3. We poll the server until the token shows up, then save it locally
+    """Login del CLI — EXCLUSIVO de usuarios LOUD Pro (de pago).
 
-    Falls back to printing the URL if the browser can't open."""
-    import webbrowser
+    Pide usuario/email + contraseña y autentica contra el backend mandando el
+    header `X-Loud-Client: cli`. El server sólo acepta ese login para cuentas
+    Pro (o admin); los usuarios free reciben 402 y se los manda a upgradear en
+    loud.codes/plans. El chat web no manda ese header, así que los free siguen
+    entrando a la web normalmente."""
+    import getpass as _gp
+
+    cprint("\n  ┌─ LOUD login (terminal · exclusivo Pro) ──────────────", C.BRAND, bold=True)
+    if not identifier:
+        cprint("  │  Usuario o email: ", C.BRAND, bold=True, end="")
+        try:
+            identifier = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            cprint("\n  · cancelado", C.YELLOW); return False
+    if not password:
+        try:
+            password = _gp.getpass("  │  Contraseña: ")
+        except (EOFError, KeyboardInterrupt):
+            cprint("\n  · cancelado", C.YELLOW); return False
+    if not identifier or not password:
+        cprint("  · faltó usuario o contraseña", C.YELLOW); return False
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(f"{cfg['api_url']}/v1/auth/cli/init")
-            if r.status_code != 200:
-                cprint(f"  · couldn't init CLI session: {r.status_code} {r.text[:200]}", C.RED)
-                return False
-            init = r.json()
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                f"{cfg['api_url']}/v1/auth/login",
+                json={"identifier": identifier, "password": password},
+                headers={"X-Loud-Client": "cli"},
+            )
     except Exception as e:
-        cprint(f"  · network error: {e}", C.RED)
+        cprint(f"  · error de red: {e}", C.RED); return False
+
+    if r.status_code == 402:
+        cprint("  └──────────────────────────────────────────────────────", C.BRAND)
+        cprint("\n  ✦ El CLI por terminal es exclusivo de LOUD Pro.", C.YELLOW, bold=True)
+        cprint("    Te da loud-pro + loud-ultra, tokens y desarrollo ilimitados.", C.GRAY)
+        cprint("    Activá tu plan acá:", C.GRAY)
+        cprint("      https://loud.codes/plans", C.BRAND, bold=True)
         return False
+    if r.status_code != 200:
+        try:    detail = r.json().get("detail", r.text[:200])
+        except Exception: detail = r.text[:200]
+        cprint(f"  · login falló ({r.status_code}): {detail}", C.RED); return False
 
-    sid  = init["session_id"]
-    code = init["code"]
-    url  = init["verification_url"]
-
-    cprint("", "")
-    cprint(f"  ┌─ LOUD login ───────────────────────────────────────────────────", C.BRAND, bold=True)
-    cprint(f"  │", C.BRAND)
-    cprint(f"  │  Para finalizar el login, abre esta URL en tu navegador:", C.BRAND)
-    cprint(f"  │", C.BRAND)
-    cprint(f"  │    {url}", C.BRAND, bold=True)
-    cprint(f"  │", C.BRAND)
-    cprint(f"  │  Código de verificación (debe coincidir en pantalla):", C.BRAND)
-    cprint(f"  │    {code}", C.BRAND, bold=True)
-    cprint(f"  │", C.BRAND)
-    cprint(f"  └─ esperando aprobación…  (Ctrl+C cancela)", C.BRAND)
-    cprint("", "")
-
-    # Try to open the browser; ignore failure (user can still copy/paste)
-    try:
-        webbrowser.open(url, new=2)
-    except Exception:
-        pass
-
-    # Poll the server every 2s until approved or expired
-    deadline = time.time() + 900  # 15 min match server TTL
-    spinner = "⣷⣯⣟⡿⢿⣻⣽⣾"; i = 0
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            while time.time() < deadline:
-                # spinner tick
-                sys.stdout.write(f"\r  {C.BRAND}{spinner[i % len(spinner)]}{C.RESET}  polling…  ")
-                sys.stdout.flush()
-                i += 1
-                try:
-                    r = await client.get(f"{cfg['api_url']}/v1/auth/cli/poll", params={"session_id": sid})
-                    if r.status_code == 200:
-                        st = r.json()
-                        if st.get("status") == "approved":
-                            sys.stdout.write("\r" + " " * 60 + "\r")
-                            save_auth({"token": st["token"], "user": st["user"], "api_url": cfg["api_url"]})
-                            u = st["user"]
-                            cprint(f"  ✓ entraste como {u.get('username') or u['email']} ({u['role']})", C.GREEN)
-                            return True
-                        if st.get("status") in ("expired", "denied"):
-                            sys.stdout.write("\r" + " " * 60 + "\r")
-                            cprint(f"  · login {st.get('status')}", C.RED)
-                            return False
-                except Exception:
-                    pass
-                await asyncio.sleep(2.0)
-    except KeyboardInterrupt:
-        sys.stdout.write("\r" + " " * 60 + "\r")
-        cprint("  · login cancelado", C.YELLOW)
-        return False
+    data = r.json()
+    save_auth({"token": data["token"], "user": data["user"], "api_url": cfg["api_url"]})
+    u = data["user"]
+    cprint("  └──────────────────────────────────────────────────────", C.BRAND)
+    cprint(f"  ✓ entraste como {u.get('username') or u['email']} ({u['role']}) · LOUD Pro", C.GREEN)
+    return True
 
     sys.stdout.write("\r" + " " * 60 + "\r")
     cprint("  · login expiró (15 min). Corre `loud login` de nuevo.", C.RED)

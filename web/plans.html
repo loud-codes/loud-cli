@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=2">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<title>LOUD · Plans</title>
+<meta name="description" content="LOUD — private, terminal-first AI. Pro plan: terminal CLI, pro + ultra models, unlimited tokens, unlimited development.">
+<link rel="icon" type="image/png" href="/favicon.png?v=3">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3">
+<meta property="og:title" content="LOUD · Plans">
+<meta property="og:description" content="Pro plan: terminal CLI + unlimited tokens. Coming soon.">
+<meta property="og:image" content="https://loud.codes/logo.png">
+<style>
+  :root{
+    --fg:#ececec; --muted:rgba(255,255,255,0.62); --dim:rgba(255,255,255,0.4);
+    --accent:#a2cd65; --accent-dark:#86b04d; --accent-glow:rgba(162,205,101,0.25);
+    --panel:rgba(255,255,255,0.03); --border:rgba(255,255,255,0.09); --border-strong:rgba(255,255,255,0.16);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:#000}
+  body{
+    color:var(--fg);
+    font-family:ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    min-height:100dvh;display:flex;flex-direction:column;align-items:center;
+    padding:48px 18px 64px;-webkit-font-smoothing:antialiased;position:relative;overflow-x:hidden;
+  }
+  body::before{
+    content:"";position:fixed;inset:0;z-index:-1;
+    background:radial-gradient(1200px 600px at 50% -10%, rgba(162,205,101,0.10), transparent 60%), #000;
+  }
+  .wrap{width:100%;max-width:920px;display:flex;flex-direction:column;align-items:center}
+  .logo{height:46px;margin-bottom:26px;opacity:.96}
+  h1{font-size:34px;line-height:1.1;font-weight:700;margin:0 0 10px;text-align:center;letter-spacing:-0.02em}
+  h1 .g{color:var(--accent)}
+  .sub{color:var(--muted);font-size:15px;text-align:center;max-width:560px;margin:0 0 40px;line-height:1.6}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:18px;width:100%}
+  @media(max-width:680px){.cards{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:28px 26px;display:flex;flex-direction:column;position:relative}
+  .card.pro{border-color:rgba(162,205,101,0.45);box-shadow:0 0 0 1px rgba(162,205,101,0.15),0 30px 80px -30px rgba(162,205,101,0.25)}
+  .tag{position:absolute;top:-11px;right:22px;background:var(--accent);color:#0a0a0a;font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;padding:4px 11px;border-radius:999px}
+  .pname{font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+  .pname.g{color:var(--accent)}
+  .price{font-size:42px;font-weight:800;margin:10px 0 2px;letter-spacing:-0.03em}
+  .price small{font-size:15px;font-weight:500;color:var(--muted)}
+  .pdesc{color:var(--muted);font-size:13.5px;line-height:1.55;margin:6px 0 20px}
+  ul{list-style:none;margin:0 0 24px;padding:0;display:flex;flex-direction:column;gap:11px}
+  li{display:flex;gap:10px;align-items:flex-start;font-size:14px;line-height:1.45}
+  li svg{flex-shrink:0;width:17px;height:17px;margin-top:1px}
+  li.on svg{stroke:var(--accent)}
+  li.off{color:var(--dim)}
+  li.off svg{stroke:var(--dim)}
+  .btn{margin-top:auto;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:46px;border-radius:12px;font-size:14.5px;font-weight:600;cursor:pointer;border:1px solid var(--border-strong);background:transparent;color:var(--fg);text-decoration:none;transition:all 150ms}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.pro{background:var(--accent);color:#0a0a0a;border:none;position:relative}
+  .btn.pro[disabled]{opacity:.85;cursor:default}
+  .btn.pro:hover{filter:brightness(1.05)}
+  .soon{font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;background:rgba(10,10,10,.18);padding:2px 8px;border-radius:999px;margin-left:6px}
+  .foot{margin-top:38px;color:var(--dim);font-size:12.5px;text-align:center;line-height:1.7}
+  .foot a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--border)}
+  .foot a:hover{color:var(--accent)}
+  code{font-family:ui-monospace,Menlo,monospace;font-size:.92em;color:var(--accent)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <img class="logo" src="/logo.png" alt="LOUD">
+    <h1>Choose your <span class="g">LOUD</span></h1>
+    <p class="sub">LOUD is a private, terminal-first AI. The web chat is free forever. The <b>Pro plan</b> unlocks the terminal CLI with <b>unlimited</b> tokens and development.</p>
+
+    <div class="cards">
+      <!-- FREE -->
+      <div class="card">
+        <div class="pname">LOUD · Basic</div>
+        <div class="price">$0<small> / forever</small></div>
+        <div class="pdesc">To get started. All the power of LOUD's web chat, free.</div>
+        <ul>
+          <li class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>LOUD web chat · <b>loud-go</b> model</li>
+          <li class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Memories, knowledge, artifacts</li>
+          <li class="off"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>Terminal CLI</li>
+          <li class="off"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>loud-pro + loud-ultra models</li>
+        </ul>
+        <a class="btn" href="https://loud.codes">Use for free</a>
+      </div>
+
+      <!-- PRO -->
+      <div class="card pro" id="upgrade">
+        <span class="tag">Recommended</span>
+        <div class="pname g">LOUD · Pro</div>
+        <div class="price">$35<small> / mo</small></div>
+        <div class="pdesc">All of LOUD's power, no limits. Terminal CLI access.</div>
+        <ul>
+          <li class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><b>Terminal CLI</b> (auth with <code>loud login</code>)</li>
+          <li class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><b>loud-pro + loud-ultra</b> models, open for everything</li>
+          <li class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><b>Unlimited tokens</b> · no caps</li>
+          <li class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Unlimited development · all open</li>
+          <li class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Everything in Basic included</li>
+        </ul>
+        <button class="btn pro" disabled>Upgrade <span class="soon">Coming soon</span></button>
+      </div>
+    </div>
+
+    <div class="foot">
+      You'll soon be able to activate the Pro plan. Meanwhile, the web chat is 100% free.<br>
+      <a href="https://loud.codes">← Back to LOUD</a>
+    </div>
+  </div>
+</body>
+</html>
