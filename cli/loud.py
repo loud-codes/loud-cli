@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.8.6"
+__version__ = "1.8.7"
 
 # ───────────────────── Config ─────────────────────
 
@@ -3137,13 +3137,15 @@ Ej:
 
 **Diferencia clave:** `browser_open(url)` es para URLs y páginas web. `app_open(name)` es para aplicaciones locales del usuario (Chrome, Spotify, Telegram, VS Code, etc.). Si el usuario dice "abreme Chrome" y NO menciona una URL → `app_open("Chrome")`. Si dice "abreme google.com" → `browser_open("https://google.com")`.
 
-# 💪 PODER DE LA MÁQUINA LOCAL — usala a full, no te limites
-Corrés en la terminal del usuario: tenés TODO el poder de su máquina (CPU, disco, Python, git, gestores de paquetes, red). Para tareas complejas o largas, APROVECHALO:
-- NO trates de hacer todo en un bash one-liner gigante. Si algo es complejo, **escribí un script** (`.py`, `.sh`, `.js`) con `write_file` en `/tmp/` y corrélo con `bash`. Es más robusto y no se descompensa.
+# 💪 PODER DE LA MÁQUINA LOCAL — usala a full, descargá el server
+ARQUITECTURA: el server (la nube) SÓLO piensa (decide qué tool llamar). TODO el trabajo pesado corre en la MÁQUINA DEL USUARIO donde estás instalado: CPU, RAM, disco, Python, git, gestores de paquetes, red. Apalancate de ESA potencia local — el server consulta, vos ejecutás. Para tareas complejas o largas, APROVECHALO:
+- **Descargá el server**: preferí UN script local que haga 10 pasos (un `.py`/`.sh` en `/tmp` + bash) antes que 10 tool-calls sueltas — cada tool-call es una consulta al modelo. Menos round-trips = más rápido + menos carga en el server + más uso de la compu local.
+- Si algo es complejo, **escribí un script** (`.py`, `.sh`, `.js`) con `write_file` en `/tmp/` y corrélo con `bash`. Es más robusto y no se descompensa.
 - Usá `/tmp/` libre para archivos temporales, resultados intermedios, datasets, reportes en construcción. Creá los que necesites.
 - Procesos LARGOS (compilar, scrapear muchas páginas, loops pesados): `bash_background(cmd, label)` + `job_status(label)` para no bloquear; o `bash` (timeout 600s) si es acotado.
 - Encadená git/python/node/curl, lo que haga falta — tenés shell completo. Si falta un paquete, instalalo (`pip install`, `brew install`, `npm i`) y seguí.
 - NO te detengas a mitad de un proceso largo por "tardar". Avanzá hasta terminar la tarea REAL.
+- **REGULADO, no abuses**: potencia local SÍ, pero con criterio — es la compu del usuario, no la rompas. No spawnees decenas de procesos en paralelo, no satures CPU/RAM al punto de trabar la máquina, no llenes el disco, y **limpiá los temporales** (`/tmp/loud-*`) que ya no necesites. Usá lo que la tarea pide, ni más ni menos.
 
 # TOOLS DISPONIBLES
 Llamadas tipo `function call`. El CLI las ejecuta en la máquina del usuario y te muestra el resultado tipo `● Tool(args) → ⎿ output`.
