@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.8.3"
+__version__ = "1.8.6"
 
 # ───────────────────── Config ─────────────────────
 
@@ -53,11 +53,12 @@ PERMS_FILE = LOUD_DIR / "permissions.json"
 
 DEFAULT_CONFIG = {
     "api_url": "https://api.loud.codes",
-    # loud-pro (qwen 7B) is the new default — loud-go (3B) was too small for
-    # multi-step task planning. Pro reasons cleanly through bash_background →
-    # curl → report flows without spawning duplicate processes or looping on
-    # job_status. Users can downshift with --model loud-go for raw speed.
-    "model": "loud-pro",
+    # CLI = el modelo MÁS PODEROSO que corre bien en la GPU (el CLI es exclusivo
+    # Pro). loud-2.0 (flagship, qwen 32B ~20GB) encadena tareas largas sin
+    # abandonar a mitad, a diferencia de loud-pro (7B) que concluía pronto en
+    # auditorías/pentest. Bajá con `--model loud-ultra`/`loud-pro`/`loud-go` por
+    # velocidad. (Techo de la GPU L40S 46GB: 32B cómodo; 72B sería muy justo.)
+    "model": "loud-2.0",
     "max_iterations": 200,   # correr hasta terminar la tarea, no abandonar a mitad de un proceso largo (el anti-loop corta repeticiones, así que no hay loop infinito)
     "permission_mode": "ask",      # ask | yolo | safe (safe = block destructive ops)
     "typewriter": True,
@@ -1433,7 +1434,7 @@ async def tool_ask_oracle(question: str) -> str:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-async def tool_bash(cmd: str, timeout: int = 120) -> str:
+async def tool_bash(cmd: str, timeout: int = 600) -> str:
     # Step-gating: refuse megachains so the model is forced to decompose.
     err = _validate_bash_complexity(cmd)
     if err:
@@ -3136,6 +3137,14 @@ Ej:
 
 **Diferencia clave:** `browser_open(url)` es para URLs y páginas web. `app_open(name)` es para aplicaciones locales del usuario (Chrome, Spotify, Telegram, VS Code, etc.). Si el usuario dice "abreme Chrome" y NO menciona una URL → `app_open("Chrome")`. Si dice "abreme google.com" → `browser_open("https://google.com")`.
 
+# 💪 PODER DE LA MÁQUINA LOCAL — usala a full, no te limites
+Corrés en la terminal del usuario: tenés TODO el poder de su máquina (CPU, disco, Python, git, gestores de paquetes, red). Para tareas complejas o largas, APROVECHALO:
+- NO trates de hacer todo en un bash one-liner gigante. Si algo es complejo, **escribí un script** (`.py`, `.sh`, `.js`) con `write_file` en `/tmp/` y corrélo con `bash`. Es más robusto y no se descompensa.
+- Usá `/tmp/` libre para archivos temporales, resultados intermedios, datasets, reportes en construcción. Creá los que necesites.
+- Procesos LARGOS (compilar, scrapear muchas páginas, loops pesados): `bash_background(cmd, label)` + `job_status(label)` para no bloquear; o `bash` (timeout 600s) si es acotado.
+- Encadená git/python/node/curl, lo que haga falta — tenés shell completo. Si falta un paquete, instalalo (`pip install`, `brew install`, `npm i`) y seguí.
+- NO te detengas a mitad de un proceso largo por "tardar". Avanzá hasta terminar la tarea REAL.
+
 # TOOLS DISPONIBLES
 Llamadas tipo `function call`. El CLI las ejecuta en la máquina del usuario y te muestra el resultado tipo `● Tool(args) → ⎿ output`.
 
@@ -4423,9 +4432,19 @@ _spinner_tty_saved = None
 _input_buffer = ""   # lo que el usuario está tipeando AHORA (mientras procesa)
 
 
+def _is_foreground() -> bool:
+    """True solo si el proceso controla la terminal (está en primer plano). En
+    background / pipe / script → False, así NO tocamos el modo raw ni leemos
+    stdin (sino el proceso recibe SIGTTIN y se cuelga/muere)."""
+    try:
+        return sys.stdin.isatty() and os.getpgrp() == os.tcgetpgrp(sys.stdin.fileno())
+    except Exception:
+        return False
+
+
 def _spinner_enter_raw() -> None:
     global _spinner_tty_saved
-    if not sys.stdin.isatty():
+    if not _is_foreground():
         return
     try:
         import termios, tty
@@ -4466,7 +4485,7 @@ class LoadingSpinner:
         """Lee las teclas que el usuario tipeó (cbreak, no bloqueante) y arma el
         buffer; cada Enter encola la línea como un task pendiente."""
         global _input_buffer
-        if not sys.stdin.isatty():
+        if not _is_foreground():
             return
         try:
             while _sel.select([sys.stdin], [], [], 0)[0]:
@@ -4496,7 +4515,7 @@ class LoadingSpinner:
     async def _loop(self) -> None:
         global _input_buffer
         i = 0
-        is_tty = sys.stdin.isatty()
+        is_tty = _is_foreground()
         try:
             sys.stdout.write("\n")
             while not self._stop:
@@ -4773,6 +4792,13 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                 "genera", "generá", "arranca", "arrancá", "construye",
                 "configura", "abrime", "abre", "armá", "arma", "haz",
                 "hace", "hacé", "build", "run", "start", "spin up",
+                # investigación / auditoría / recon — tareas multi-paso LARGAS
+                # (antes cortaban a mitad porque no matcheaban ningún verbo).
+                "busca", "buscame", "buscá", "auditá", "audita", "auditar",
+                "analiza", "analizá", "escanea", "escaneá", "scan", "scaneá",
+                "revisa", "revisá", "reporte", "report", "encontrá", "encuentra",
+                "todas las", "todos los", "completo", "completa", "pentest",
+                "vulnerab", "audit", "investiga", "investigá", "find",
             ))
             looks_like_plan = any(m in t for m in announce_markers)
             forced_nudges = sum(1 for m in messages if m.get("role") == "user" and m.get("_force_exec"))
@@ -4780,14 +4806,22 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
             # El nudge se inyecta como mensaje del USER ("dale, ejecutá") en lugar de system
             # adversarial — los modelos grandes responden al system reprimiéndose y pidiendo
             # clarificación. Al usuario lo siguen sin discutir.
-            if (looks_like_plan or user_action_intent) and forced_nudges < 3:
+            # LOUD no se detiene a mitad: mientras quede tarea, lo empujamos a
+            # seguir. El límite alto (30) + el anti-loop (corta repeticiones
+            # idénticas) + max_iterations=200 son la red real; no abandona solo.
+            if (looks_like_plan or user_action_intent) and forced_nudges < 30:
                 messages.append({"role": "assistant", "content": full_text})
                 messages.append({
                     "role": "user",
                     "_force_exec": True,
-                    "content": "Dale, ejecutá ese paso ahora con la tool que corresponda.",
+                    "content": ("Dale, SEGUÍ — todavía NO terminaste. Ejecutá el próximo paso con la "
+                                "tool que corresponda y NO pares hasta entregar el resultado COMPLETO "
+                                "que te pedí (todas las fases, todo el reporte). Si un comando falló "
+                                "(ej: un flag no soportado como `grep -P` en macOS → usá `grep -E` o "
+                                "`perl -ne`), corregilo y reintentá — auto-reparate, no abandones. Sólo "
+                                "parás cuando la tarea esté REALMENTE completa."),
                 })
-                cprint("  · ⚠ dale, ejecutá ese paso", C.YELLOW)
+                cprint("  · ⚠ seguí — no termines a mitad (LOUD no se detiene)", C.YELLOW)
                 continue
             cprint("", "")  # newline after typewriter
             messages.append({"role": "assistant", "content": full_text})
