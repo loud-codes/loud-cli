@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 
 # ───────────────────── Config ─────────────────────
 
@@ -164,6 +164,68 @@ def _shell_args(cmd: str) -> list[str]:
 
 # ───────────────────── Arrow-key selector ─────────────────────
 
+# ───────────────────── Cola de input async (escribir mientras trabaja) ─────────────────────
+# Como Claude Code: mientras el agente procesa, podés seguir tipeando para
+# dejarle más tasks/preguntas; se encolan y se procesan al terminar el turno.
+# Un pump lee stdin en background SÓLO durante el turno; se PAUSA cuando un
+# prompt interactivo (permiso y/n) necesita ser dueño del stdin.
+import threading as _threading
+import select as _sel
+
+_input_queue: list = []
+_iq_lock = _threading.Lock()
+_pump_active = _threading.Event()   # set → el pump lee stdin y encola líneas
+_pump_pause  = _threading.Event()   # set → un prompt interactivo es dueño del stdin
+_pump_started = False
+
+
+def _stdin_pump_loop() -> None:
+    while True:
+        if not _pump_active.is_set():
+            _pump_active.wait(timeout=1.0); continue
+        if _pump_pause.is_set():
+            time.sleep(0.04); continue
+        try:
+            if not sys.stdin.isatty():
+                time.sleep(0.3); continue
+            r, _, _ = _sel.select([sys.stdin], [], [], 0.15)
+            if not r or _pump_pause.is_set() or not _pump_active.is_set():
+                continue
+            line = sys.stdin.readline()
+            if line == "":
+                time.sleep(0.2); continue
+            line = line.strip()
+            if line:
+                with _iq_lock:
+                    _input_queue.append(line)
+                try: cprint(f"  {C.GRAY}▸ en cola: {shorten(line, 80)}{C.RESET}", "")
+                except Exception: pass
+        except Exception:
+            time.sleep(0.1)
+
+
+def _ensure_pump() -> None:
+    global _pump_started
+    if not _pump_started and sys.stdin.isatty():
+        _threading.Thread(target=_stdin_pump_loop, daemon=True).start()
+        _pump_started = True
+
+
+def _next_queued_input():
+    with _iq_lock:
+        return _input_queue.pop(0) if _input_queue else None
+
+
+def select_option(prompt_text: str, options: list, default: int = 0) -> str:
+    """Wrapper: pausa el pump de input mientras se lee la opción (el prompt de
+    permiso es dueño del stdin), y lo reanuda al terminar."""
+    _pump_pause.set()
+    try:
+        return _select_option_raw(prompt_text, options, default)
+    finally:
+        _pump_pause.clear()
+
+
 def _read_key() -> str:
     """Block on one keystroke. Returns 'up', 'down', 'enter', 'esc', 'q', 'e',
     'y', 'n', 'a', 's', or '' for unknown. Falls back to line-input on non-TTY."""
@@ -201,7 +263,7 @@ def _read_key() -> str:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-def select_option(prompt_text: str, options: list[tuple[str, str]], default: int = 0) -> str:
+def _select_option_raw(prompt_text: str, options: list[tuple[str, str]], default: int = 0) -> str:
     """Interactive arrow-key selector. options = [(key, label), ...].
     Up/Down to move, Enter to confirm, Esc to cancel (returns 'esc').
     Hotkeys still work — pressing the first letter of an option jumps to it.
@@ -868,8 +930,13 @@ def confirm_floating_l(action_title: str, action_body: str,
         # Headless fallback
         cprint(f"\n  L confirm · {action_title}", C.BRAND, bold=True)
         cprint(f"     {action_body}", C.GRAY)
-        try: ans = (input("  → [y]es / [n]o" + (" / [e]dit" if allow_edit else "") + ": ").strip().lower() or "n")[0]
-        except (EOFError, KeyboardInterrupt): return "deny"
+        _pump_pause.set()
+        try:
+            ans = (input("  → [y]es / [n]o" + (" / [e]dit" if allow_edit else "") + ": ").strip().lower() or "n")[0]
+        except (EOFError, KeyboardInterrupt):
+            return "deny"
+        finally:
+            _pump_pause.clear()
         return {"y": "allow", "n": "deny", "e": "edit" if allow_edit else "deny"}.get(ans, "deny")
 
     decision = ["deny"]
@@ -4907,13 +4974,20 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
         sys.stdout.write(render_banner(cfg))
         sys.stdout.flush()
 
+    _ensure_pump()   # lector de stdin en background → escribir mientras trabaja
     while True:
-        try:
-            cprint("loud❯ ", C.BRAND, bold=True, end="")
-            user_text = input().strip()
-        except (EOFError, KeyboardInterrupt):
-            cprint("\n  · bye", C.GRAY)
-            break
+        # Primero drená lo que el usuario tipeó DURANTE el turno anterior (cola).
+        queued = _next_queued_input()
+        if queued is not None:
+            user_text = queued.strip()
+            cprint(f"loud❯ {user_text}  {C.GRAY}(de la cola){C.RESET}", C.BRAND, bold=True)
+        else:
+            try:
+                cprint("loud❯ ", C.BRAND, bold=True, end="")
+                user_text = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                cprint("\n  · bye", C.GRAY)
+                break
         if not user_text:
             continue
 
@@ -5064,7 +5138,12 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
             cprint( "  └─", C.YELLOW)
             continue
 
-        await run_turn(cfg, messages, user_text)
+        # Pump ACTIVO durante el turno → lo que tipees mientras procesa se encola.
+        _pump_active.set()
+        try:
+            await run_turn(cfg, messages, user_text)
+        finally:
+            _pump_active.clear()
         cprint("", "")
         # No auto-save. The REPL conversation lives only in memory for this
         # session. Use /save <file> to export, /open <file> to import.
