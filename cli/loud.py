@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.8.2"
+__version__ = "1.8.3"
 
 # ───────────────────── Config ─────────────────────
 
@@ -4418,9 +4418,42 @@ def _pulse_logo_frame(tick: int) -> str:
     return f"{L}{rest}"
 
 
+# ── Modo raw (cbreak) para leer el teclado char-by-char mientras el spinner gira ──
+_spinner_tty_saved = None
+_input_buffer = ""   # lo que el usuario está tipeando AHORA (mientras procesa)
+
+
+def _spinner_enter_raw() -> None:
+    global _spinner_tty_saved
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios, tty
+        _spinner_tty_saved = termios.tcgetattr(sys.stdin.fileno())
+        tty.setcbreak(sys.stdin.fileno())
+    except Exception:
+        _spinner_tty_saved = None
+
+
+def _spinner_exit_raw() -> None:
+    global _spinner_tty_saved
+    if _spinner_tty_saved is not None:
+        try:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _spinner_tty_saved)
+        except Exception:
+            pass
+        _spinner_tty_saved = None
+
+
+import atexit as _atexit
+_atexit.register(_spinner_exit_raw)   # red final: nunca dejar el terminal en raw
+
+
 class LoadingSpinner:
-    """Centered, color-pulsing spinner that runs in the background while the
-    model is generating. Caller drives it: start(label) → stop()."""
+    """Spinner que gira mientras el modelo genera. Caja de input fija ABAJO: el
+    usuario puede seguir tipeando (lo ve en vivo) y cada Enter encola un task.
+    El spinner va arriba, tu input abajo — como Claude Code."""
     def __init__(self, color: str = ""):
         self._task: asyncio.Task | None = None
         self._stop = False
@@ -4429,22 +4462,65 @@ class LoadingSpinner:
     def set_label(self, label: str) -> None:
         self._label = label
 
+    def _drain_keys(self) -> None:
+        """Lee las teclas que el usuario tipeó (cbreak, no bloqueante) y arma el
+        buffer; cada Enter encola la línea como un task pendiente."""
+        global _input_buffer
+        if not sys.stdin.isatty():
+            return
+        try:
+            while _sel.select([sys.stdin], [], [], 0)[0]:
+                ch = sys.stdin.read(1)
+                if ch in ("\r", "\n"):
+                    line = _input_buffer.strip()
+                    _input_buffer = ""
+                    if line:
+                        with _iq_lock:
+                            _input_queue.append(line)
+                        # subí el "en cola" por encima de la caja de input
+                        sys.stdout.write("\r\033[2K  " + C.GRAY + "▸ en cola: " + shorten(line, 80) + C.RESET + "\n\033[2K")
+                elif ch in ("\x7f", "\b"):
+                    _input_buffer = _input_buffer[:-1]
+                elif ch == "\x03":  # Ctrl+C
+                    raise KeyboardInterrupt
+                elif ch == "\x1b":  # descartar secuencias de escape (flechas) por ahora
+                    while _sel.select([sys.stdin], [], [], 0)[0]:
+                        sys.stdin.read(1)
+                elif ch.isprintable():
+                    _input_buffer += ch
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            pass
+
     async def _loop(self) -> None:
+        global _input_buffer
         i = 0
+        is_tty = sys.stdin.isatty()
         try:
             sys.stdout.write("\n")
             while not self._stop:
                 logo = _pulse_logo_frame(i)
                 frame = _SPINNER_FRAMES[i % len(_SPINNER_FRAMES)]
-                line = f"  {logo} {C.BRAND}{frame}{C.RESET} {C.GRAY}{self._label}…{C.RESET}"
-                # Erase line, redraw.
-                sys.stdout.write("\r\033[2K" + line)
+                spin = f"  {logo} {C.BRAND}{frame}{C.RESET} {C.GRAY}{self._label}…{C.RESET}"
+                if is_tty:
+                    self._drain_keys()
+                    # spinner arriba + caja de input abajo (con cursor ▏)
+                    inp = f"  {C.GRAY}▸ {_input_buffer}{C.BRAND}▏{C.RESET}"
+                    sys.stdout.write("\r\033[2K" + spin + "\n\r\033[2K" + inp + "\033[A")
+                else:
+                    sys.stdout.write("\r\033[2K" + spin)
                 sys.stdout.flush()
                 i += 1
-                await asyncio.sleep(0.08)
+                await asyncio.sleep(0.06)
         finally:
-            sys.stdout.write("\r\033[2K")
+            if is_tty:
+                # limpiar las 2 líneas (spinner + input)
+                sys.stdout.write("\r\033[2K\n\r\033[2K\033[A\r")
+            else:
+                sys.stdout.write("\r\033[2K")
             sys.stdout.flush()
+            _spinner_exit_raw()   # seguridad: restaurar el terminal pase lo que pase
 
     def start(self, label: str | None = None) -> None:
         if label:
@@ -4452,6 +4528,8 @@ class LoadingSpinner:
         if self._task and not self._task.done():
             return
         self._stop = False
+        _pump_pause.set()      # el spinner es dueño del stdin mientras gira
+        _spinner_enter_raw()
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
@@ -4460,6 +4538,8 @@ class LoadingSpinner:
             try: await self._task
             except Exception: pass
             self._task = None
+        _spinner_exit_raw()
+        _pump_pause.clear()
 
 
 async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
