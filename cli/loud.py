@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 
 # ───────────────────── Config ─────────────────────
 
@@ -111,7 +111,9 @@ def set_lang(lang: str) -> None:
     LANG = "es" if str(lang).lower().startswith("es") else "en"
 
 
-def t(en: str, es: str) -> str:
+def tr(en: str, es: str) -> str:
+    # NOTE: named `tr` (not `t`) on purpose — several functions use a local `t`
+    # (e.g. timestamps), and a global `t` would be shadowed → UnboundLocalError.
     return es if LANG == "es" else en
 
 
@@ -3567,7 +3569,7 @@ async def cmd_login(cfg: dict, identifier: str | None = None, password: str | No
 
 async def cmd_logout() -> None:
     clear_auth()
-    cprint(t("  ✓ signed out", "  ✓ sesión cerrada"), C.GREEN)
+    cprint(tr("  ✓ signed out", "  ✓ sesión cerrada"), C.GREEN)
 
 
 async def cmd_connect(cfg: dict) -> int:
@@ -3755,30 +3757,36 @@ async def cmd_setup_local(cfg: dict) -> int:
 
 
 async def cmd_update(cfg: dict) -> int:
-    """Self-update: detect how the user installed LOUD and pull the latest."""
-    cprint("\n  Buscando actualización…", C.BRAND, bold=True)
+    """Self-update. For the curl/Windows install it swaps ONLY the code
+    (loud.py) in place — the venv and any installed components are kept, so an
+    update is just that: an update, never a full reinstall. Homebrew and git
+    checkouts delegate to their own updater."""
+    cprint(tr("\n  Checking for updates…", "\n  Buscando actualización…"), C.BRAND, bold=True)
 
-    # 1) Check latest version from GitHub
+    # 1) Fetch the latest source (we reuse the same text both to read its
+    #    version AND to install it — no second download).
     latest = None
+    latest_src = None
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
                 "https://raw.githubusercontent.com/loud-codes/loud-cli/main/cli/loud.py",
                 headers={"User-Agent": "loud-cli-updater"},
             )
-            m = re.search(r'__version__\s*=\s*[\'"]([^\'"]+)[\'"]', r.text)
-            if m:
-                latest = m.group(1)
+            if r.status_code == 200 and r.text:
+                latest_src = r.text
+                m = re.search(r'__version__\s*=\s*[\'"]([^\'"]+)[\'"]', r.text)
+                if m:
+                    latest = m.group(1)
     except Exception as e:
-        cprint(f"  · no pude consultar GitHub: {e}", C.YELLOW)
+        cprint(tr(f"  · couldn't reach GitHub: {e}", f"  · no pude consultar GitHub: {e}"), C.YELLOW)
 
     if latest:
-        cprint(f"  · instalado: {__version__}    latest: {latest}", C.GRAY)
+        cprint(tr(f"  · installed: {__version__}    latest: {latest}",
+                 f"  · instalado: {__version__}    latest: {latest}"), C.GRAY)
         if latest == __version__:
-            cprint("  ✓ ya estás en la última versión", C.GREEN)
+            cprint(tr("  ✓ already on the latest version", "  ✓ ya estás en la última versión"), C.GREEN)
             return 0
-    else:
-        cprint("  · no pude detectar la versión más reciente — actualizo de todos modos.", C.GRAY)
 
     # 2) Detect install method
     self_path = Path(__file__).resolve()
@@ -3791,47 +3799,79 @@ async def cmd_update(cfg: dict) -> int:
     via_curl = ".loud/install/src" in str(self_path)
 
     if via_brew:
-        cprint("  · instalado vía Homebrew — corriendo `brew upgrade loud`", C.BRAND)
+        cprint(tr("  · installed via Homebrew — running `brew upgrade loud`",
+                 "  · instalado vía Homebrew — corriendo `brew upgrade loud`"), C.BRAND)
         try:
             subprocess.run(["brew", "update"], check=False)
             subprocess.run(["brew", "upgrade", "loud"], check=True)
-            cprint("  ✓ actualizado vía Homebrew", C.GREEN)
+            cprint(tr("  ✓ updated via Homebrew", "  ✓ actualizado vía Homebrew"), C.GREEN)
             return 0
         except subprocess.CalledProcessError as e:
-            cprint(f"  · brew upgrade falló: {e}", C.RED)
+            cprint(tr(f"  · brew upgrade failed: {e}", f"  · brew upgrade falló: {e}"), C.RED)
             return 1
 
+    # 3) curl / Windows install → FAST in-place code swap. Keeps the venv and
+    #    every installed component; only loud.py is replaced.
     if via_curl or IS_WINDOWS:
-        # Re-run the installer
-        if IS_WINDOWS:
-            cmd = ["powershell", "-Command", "iwr -useb https://loud.codes/install.ps1 | iex"]
-        else:
-            cmd = ["bash", "-c", "curl -fsSL https://loud.codes/install.sh | bash"]
-        cprint("  · actualizando con el instalador oficial…", C.BRAND)
-        try:
-            subprocess.run(cmd, check=True)
-            cprint("  ✓ actualizado", C.GREEN)
-            return 0
-        except subprocess.CalledProcessError as e:
-            cprint(f"  · update script falló: {e}", C.RED)
+        if not latest_src:
+            cprint(tr("  · couldn't download the latest code — try again in a moment.",
+                     "  · no pude bajar el código más reciente — probá de nuevo en un momento."), C.YELLOW)
             return 1
+        import tempfile, py_compile, shutil as _shutil
+        # Validate the downloaded code compiles BEFORE touching the live file.
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as tf:
+                tf.write(latest_src)
+                tmp_name = tf.name
+            py_compile.compile(tmp_name, doraise=True)
+        except Exception as e:
+            cprint(tr(f"  · the downloaded update looks corrupt, aborting: {e}",
+                     f"  · el update descargado parece corrupto, aborto: {e}"), C.RED)
+            try: os.unlink(tmp_name)
+            except Exception: pass
+            return 1
+        # Back up the current code, then replace it.
+        try:
+            try: _shutil.copy2(self_path, self_path.with_suffix(".py.bak"))
+            except Exception: pass
+            os.replace(tmp_name, self_path)
+            cprint(tr(f"  ✓ updated to {latest or 'latest'} — code only, venv & components untouched.",
+                     f"  ✓ actualizado a {latest or 'latest'} — solo el código, venv y complementos intactos."), C.GREEN)
+            cprint(tr("  · restart loud to use the new version.",
+                     "  · reiniciá loud para usar la versión nueva."), C.GRAY)
+            return 0
+        except Exception as e:
+            cprint(tr(f"  · couldn't write the update ({e}); falling back to the installer…",
+                     f"  · no pude escribir el update ({e}); vuelvo al instalador…"), C.YELLOW)
+            if IS_WINDOWS:
+                cmd = ["powershell", "-Command", "iwr -useb https://loud.codes/install.ps1 | iex"]
+            else:
+                cmd = ["bash", "-c", "curl -fsSL https://loud.codes/install.sh | bash"]
+            try:
+                subprocess.run(cmd, check=True)
+                cprint(tr("  ✓ updated", "  ✓ actualizado"), C.GREEN)
+                return 0
+            except subprocess.CalledProcessError as e2:
+                cprint(tr(f"  · installer failed: {e2}", f"  · instalador falló: {e2}"), C.RED)
+                return 1
 
-    # Manual git checkout — try to fetch + pull
+    # 4) Manual git checkout — fetch + fast-forward.
     src = self_path.parent.parent  # cli/loud.py → repo root
     git = src / ".git"
     if git.exists():
-        cprint(f"  · git pull en {src}", C.BRAND)
+        cprint(tr(f"  · git pull in {src}", f"  · git pull en {src}"), C.BRAND)
         try:
             subprocess.run(["git", "-C", str(src), "fetch", "--quiet"], check=True)
             subprocess.run(["git", "-C", str(src), "pull", "--ff-only"], check=True)
-            cprint("  ✓ actualizado vía git", C.GREEN)
+            cprint(tr("  ✓ updated via git", "  ✓ actualizado vía git"), C.GREEN)
             return 0
         except subprocess.CalledProcessError as e:
-            cprint(f"  · git pull falló: {e}", C.RED)
+            cprint(tr(f"  · git pull failed: {e}", f"  · git pull falló: {e}"), C.RED)
             return 1
 
-    cprint("  · no pude detectar el método de instalación.", C.YELLOW)
-    cprint("    Reinstala manual:", C.GRAY)
+    cprint(tr("  · couldn't detect the install method.",
+             "  · no pude detectar el método de instalación."), C.YELLOW)
+    cprint(tr("    Reinstall manually:", "    Reinstala manual:"), C.GRAY)
     cprint("      macOS/Linux:  curl -fsSL https://loud.codes/install.sh | bash", C.BRAND)
     cprint("      Windows:      iwr -useb https://loud.codes/install.ps1 | iex", C.BRAND)
     cprint("      Homebrew:     brew upgrade loud", C.BRAND)
@@ -5176,8 +5216,8 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
         is_slash_cmd = user_text.startswith("/") and first_token in SLASH_COMMANDS
         if user_text.startswith("/") and not is_slash_cmd:
             if not _looks_like_filesystem_path(user_text):
-                cprint(t(f"  · unknown command: {first_token}", f"  · comando desconocido: {first_token}"), C.RED)
-                cprint(t(f"  · commands: {' · '.join(sorted(SLASH_COMMANDS))}",
+                cprint(tr(f"  · unknown command: {first_token}", f"  · comando desconocido: {first_token}"), C.RED)
+                cprint(tr(f"  · commands: {' · '.join(sorted(SLASH_COMMANDS))}",
                          f"  · comandos: {' · '.join(sorted(SLASH_COMMANDS))}"), C.GRAY)
                 continue
             # else: fall through, treat the pasted path as chat input
@@ -5190,7 +5230,7 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
                 cprint(slash_help().format(model=cfg["model"]), C.BRAND)
             elif cmd == "/lang":
                 choice = select_option(
-                    t("Choose CLI language:", "Elegí el idioma del CLI:"),
+                    tr("Choose CLI language:", "Elegí el idioma del CLI:"),
                     ["English", "Espanol"],
                     default=(1 if LANG == "es" else 0),
                 )
@@ -5198,7 +5238,7 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
                 cfg["lang"] = new_lang
                 set_lang(new_lang)
                 save_config(cfg)
-                cprint(t(f"  · language set to English", f"  · idioma cambiado a Español"), C.GREEN)
+                cprint(tr(f"  · language set to English", f"  · idioma cambiado a Español"), C.GREEN)
             elif cmd == "/reset":
                 reset_session()
                 _TODOS.clear()
@@ -5276,14 +5316,14 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
                 else:
                     cprint("  · uso: /setup local", C.YELLOW)
             elif cmd == "/brain":
-                cprint(t("  · brain is not available from the terminal — that feature is web-admin only.",
+                cprint(tr("  · brain is not available from the terminal — that feature is web-admin only.",
                          "  · brain no está disponible desde terminal — esa función es solo para la web admin."), C.YELLOW)
             elif cmd == "/cwd":
                 cprint(f"  · {Path.cwd()}", C.YELLOW)
             elif cmd == "/login":
                 ok = await cmd_login(cfg)
                 if ok:
-                    cprint(t("  · you can start chatting now", "  · ya puedes empezar a chatear"), C.GRAY)
+                    cprint(tr("  · you can start chatting now", "  · ya puedes empezar a chatear"), C.GRAY)
             elif cmd == "/logout":
                 await cmd_logout()
             elif cmd == "/whoami":
@@ -5321,13 +5361,8 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
         # without forcing login. The check only kicks in when they actually
         # want to chat.
         if not get_token():
-            cprint("", "")
-            cprint(t("  ┌─ not signed in", "  ┌─ no estás logueado"), C.YELLOW, bold=True)
-            cprint(t(f"  │  Type {C.BOLD}{C.BRAND}/login{C.RESET}{C.YELLOW} to sign in (opens your browser).",
-                     f"  │  Escribe {C.BOLD}{C.BRAND}/login{C.RESET}{C.YELLOW} para entrar (abre tu navegador)."), C.YELLOW)
-            cprint(t("  │  I can't process prompts without a session.",
-                     "  │  Sin sesión no puedo procesar prompts."), C.YELLOW)
-            cprint( "  └─", C.YELLOW)
+            cprint(tr(f"\n  Login required — type {C.BOLD}{C.BRAND}/login{C.RESET}{C.YELLOW} to continue.",
+                      f"\n  Necesitás iniciar sesión — escribí {C.BOLD}{C.BRAND}/login{C.RESET}{C.YELLOW} para continuar."), C.YELLOW)
             continue
 
         # Pump ACTIVO durante el turno → lo que tipees mientras procesa se encola.
