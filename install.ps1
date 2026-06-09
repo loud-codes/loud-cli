@@ -249,14 +249,18 @@ Ok "venv ready ($($pyInfo.version))"
 Step "Installing core dependency (httpx)"
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
 
-# Core: httpx is REQUIRED (LOUD won't start without it). --no-cache-dir avoids the
-# "Cache entry deserialization failed" warning from a corrupt pip cache. Verify + retry.
-& $VenvPython -m pip install --quiet --upgrade --no-cache-dir pip 2>$null
-& $VenvPython -m pip install --quiet --no-cache-dir httpx
+# Silence pip's noise: no cache (kills the "Cache entry deserialization failed"
+# warnings from a corrupt pip cache) and no version-check chatter.
+$env:PIP_NO_CACHE_DIR = "1"
+$env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+$env:PYTHONWARNINGS = "ignore"
+
+# Core: httpx is REQUIRED (LOUD won't start without it). Verify the import + retry once.
+& $VenvPython -m pip install --quiet --no-cache-dir --no-warn-script-location httpx
 & $VenvPython -c "import httpx" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Warn "First httpx attempt failed, retrying..."
-    & $VenvPython -m pip install --no-cache-dir httpx
+    & $VenvPython -m pip install --quiet --no-cache-dir httpx
     & $VenvPython -c "import httpx" 2>$null
     if ($LASTEXITCODE -ne 0) {
         Bail "Could not install 'httpx' (core dependency). Check your connection and re-run: iwr -useb https://loud.codes/install.ps1 | iex"
@@ -264,43 +268,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 Ok "core ready - LOUD can run now"
 
-# Optional toolkit (browser automation, web scraping, voice). It's NOT required:
-# LOUD runs fine without it. ~500 MB, so we ASK before installing (non-invasive).
-$wantToolkit = $false
-if ($env:LOUD_SKIP_TOOLKIT) {
-    $wantToolkit = $false
-} elseif ($env:LOUD_WITH_TOOLKIT) {
-    $wantToolkit = $true
-} else {
-    Write-Host ""
-    Write-Host "  Optional toolkit: browser automation + web scraping + voice (~500 MB)." -ForegroundColor Gray
-    Write-Host "  Not required - LOUD already works. You can also add it later with 'loud setup gui'." -ForegroundColor DarkGray
-    $wantToolkit = Ask-YesNo "Install the optional toolkit now?" $false
-}
-
-if ($wantToolkit) {
-    Step "Installing toolkit (this can take a few minutes)"
-    try {
-        & $VenvPython -m pip install --quiet --no-cache-dir playwright sounddevice numpy pyautogui pillow mss
-        Ok "browser + voice + GUI deps installed"
-    } catch { Warn "toolkit deps partially failed - retry later with 'loud setup gui'" }
-
-    Step "Installing Scrapling (scrape / scrape_stealth / scrape_dynamic)"
-    try {
-        & $VenvPython -m pip install --quiet --no-cache-dir "scrapling[fetchers]"
-        Ok "scrapling[fetchers] installed"
-    } catch { Warn "scrapling failed - retry later with 'loud setup gui'" }
-
-    Step "Downloading Chromium for Playwright (~400 MB)"
-    try {
-        & $VenvPython -m playwright install chromium
-        Ok "chromium ready"
-    } catch {
-        Write-Host "  warn: chromium install hit an error - run 'loud setup gui' later to retry"
-    }
-} else {
-    Write-Host "  Skipped the optional toolkit. Add it anytime with: loud setup gui" -ForegroundColor DarkGray
-}
+# NOTE: optional components (browser automation, web scraping, voice) are NOT
+# installed here on purpose. The installer only sets up the vital parts: Python
+# + LOUD core. LOUD installs extras on demand - when a command actually needs a
+# component, it asks you to confirm before installing just that one.
 
 # ───────────────────────── shim ─────────────────────────
 Step "Installing the 'loud' command"
