@@ -1,23 +1,28 @@
 # LOUD installer for Windows (PowerShell).
 # Run: iwr -useb https://loud.codes/install.ps1 | iex
 #   or save & run:  PowerShell -ExecutionPolicy Bypass -File install.ps1
+#
+# Env overrides (optional):
+#   LOUD_ASSUME_YES=1   answer "yes" to every prompt (non-interactive installs)
+#   LOUD_WITH_TOOLKIT=1 install the optional toolkit without asking
+#   LOUD_SKIP_TOOLKIT=1 never install the optional toolkit
 
 $ErrorActionPreference = "Stop"
 
 # ───────────────────────── TLS 1.2 ─────────────────────────
-# Windows PowerShell 5.1 (lo que trae Windows 10/Server por defecto) negocia
-# TLS 1.0, y python.org / github RECHAZAN eso -> todas las descargas HTTPS
-# fallan con "Could not create SSL/TLS secure channel". Forzamos TLS 1.2/1.3.
+# Windows PowerShell 5.1 (the default on Windows 10 / Server) negotiates TLS 1.0,
+# and python.org / github REJECT that -> every HTTPS download fails with
+# "Could not create SSL/TLS secure channel". Force TLS 1.2/1.3.
 try {
     [Net.ServicePointManager]::SecurityProtocol = `
         [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls13 } catch {}
 } catch {}
 
-# ───────────────────────── encoding fix ─────────────────────────
-# El logo es 100% ASCII (no usa block chars ██╗) asi que NUNCA sale `?????`,
-# ni siquiera bajando el script con `iwr | iex`. Igual forzamos UTF-8 en la
-# consola para que la salida de Python / pip con acentos se vea bien.
+# ───────────────────────── encoding ─────────────────────────
+# The logo is 100% ASCII (no block chars) so it never shows as `?????`, not even
+# when piped through `iwr | iex`. We still force UTF-8 so any non-ASCII output
+# from Python / pip renders correctly.
 try {
     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
     [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
@@ -32,6 +37,20 @@ function Ok($text)    { Write-Host "  [OK] $text" -ForegroundColor Green }
 function Warn($text)  { Write-Host "  [!] $text" -ForegroundColor Yellow }
 function Bail($text)  { Write-Host "  [X] $text" -ForegroundColor Red; exit 1 }
 
+# Yes/No prompt. Returns $true / $false. Honors LOUD_ASSUME_YES and falls back to
+# the default when running non-interactively (no console to read from).
+function Ask-YesNo($question, $defaultYes) {
+    if ($env:LOUD_ASSUME_YES) { return $true }
+    $suffix = if ($defaultYes) { "[Y/n]" } else { "[y/N]" }
+    try {
+        $ans = Read-Host "  $question $suffix"
+    } catch {
+        return $defaultYes
+    }
+    if ([string]::IsNullOrWhiteSpace($ans)) { return $defaultYes }
+    return ($ans.Trim() -match '^(y|yes)$')
+}
+
 Write-Host ""
 Brand "   _      ___    _   _   ____  "
 Brand "  | |    / _ \  | | | | |  _ \ "
@@ -42,21 +61,20 @@ Write-Host "  Terminal-first AI - loud.codes" -ForegroundColor DarkGray
 Write-Host ""
 
 # ───────────────────────── checks ─────────────────────────
-Step "Checking Python >= 3.10"
+Step "Checking for Python >= 3.10"
 
-# Find a real Python (not the Microsoft Store stub which only triggers a Store dialog).
-# Prefer specific stable versions (3.12 → 3.11 → 3.10) via the `py` launcher
-# before falling back to whichever python is on PATH. Skips 3.14+ which is
-# bleeding-edge and many packages still don't support it.
+# Find a real Python (not the Microsoft Store stub, which only opens a Store dialog).
+# Prefer specific stable versions (3.12 -> 3.11 -> 3.10) via the `py` launcher
+# before falling back to whatever python is on PATH.
 function Find-RealPython {
     # 1) `py -3.X` for specific stable minors
     foreach ($ver in @('3.12','3.11','3.13','3.10')) {
         $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
         if ($pyLauncher) {
             try {
-                # 2>&1 + ErrorActionPreference=Stop haría que un `py` SIN runtime
-                # ("No suitable Python runtime found") lance excepción y mate el
-                # script. Lo envolvemos para que simplemente siga buscando.
+                # 2>&1 + ErrorActionPreference=Stop would make a `py` WITHOUT a runtime
+                # ("No suitable Python runtime found") throw and kill the whole script.
+                # Wrapped in try/catch so it just keeps looking.
                 $out = (& $pyLauncher.Source "-$ver" --version 2>&1 | Out-String)
                 if ($out -match 'Python (\d+)\.(\d+)') {
                     $major = [int]$Matches[1]; $minor = [int]$Matches[2]
@@ -67,7 +85,7 @@ function Find-RealPython {
             } catch {}
         }
     }
-    # 2) Generic launchers
+    # 2) Generic launchers on PATH
     foreach ($candidate in @('python3', 'python', 'py')) {
         $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
         if (-not $cmd) { continue }
@@ -90,47 +108,47 @@ function Refresh-Path {
     $env:Path = ($machine, $user -join ';')
 }
 
-# Instala Python 3.12 AUTOMATICAMENTE (sin preguntar). Intenta winget; si no hay
-# winget (tipico en Windows Server) baja el instalador oficial de python.org y lo
-# corre en silencio. Devuelve el $pyInfo nuevo (o $null si algo salio muy mal).
+# Installs Python 3.12. Tries winget first; if winget is missing (common on
+# Windows Server) it downloads the official python.org installer and runs it
+# silently. Returns the new $pyInfo (or $null if something went wrong).
 function Install-Python312 {
-    # --- Via 1: winget (Win10 1709+ / Win11) ---
+    # --- Path 1: winget (Win10 1709+ / Win11) ---
     if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Step "Instalando Python 3.12 via winget (~1-2 min)"
+        Step "Installing Python 3.12 via winget (~1-2 min)"
         try {
             Start-Process -FilePath 'winget' -ArgumentList @(
                 'install', '--id', 'Python.Python.3.12',
                 '--silent', '--accept-source-agreements', '--accept-package-agreements',
                 '--scope', 'user'
             ) -NoNewWindow -Wait -PassThru | Out-Null
-        } catch { Warn "winget fallo, paso a descarga directa..." }
+        } catch { Warn "winget failed, falling back to direct download..." }
         Refresh-Path
         Start-Sleep -Seconds 2
         $p = Find-RealPython
         if ($p) { return $p }
     }
 
-    # --- Via 2: descarga directa del instalador oficial (sin winget) ---
+    # --- Path 2: direct download of the official installer (no winget) ---
     $pyVer = '3.12.8'
     $arch  = if ([Environment]::Is64BitOperatingSystem) { '-amd64' } else { '' }
     $pyUrl = "https://www.python.org/ftp/python/$pyVer/python-$pyVer$arch.exe"
     $pyExe = Join-Path $env:TEMP "loud-python-$pyVer.exe"
-    Step "Descargando Python $pyVer oficial de python.org (~28 MB)"
+    Step "Downloading official Python $pyVer from python.org (~28 MB)"
     try {
         Invoke-WebRequest -UseBasicParsing -Uri $pyUrl -OutFile $pyExe
     } catch {
-        Bail "No se pudo descargar Python desde $pyUrl . Revisa tu conexion y reintenta: iwr -useb https://loud.codes/install.ps1 | iex"
+        Bail "Could not download Python from $pyUrl . Check your connection and re-run: iwr -useb https://loud.codes/install.ps1 | iex"
     }
-    Step "Instalando Python $pyVer (silencioso, lo agrega al PATH)"
-    # /quiet = sin UI ; PrependPath=1 = lo agrega al PATH ; InstallAllUsers=0 = sin admin
+    Step "Installing Python $pyVer (silent, adds it to PATH)"
+    # /quiet = no UI ; PrependPath=1 = add to PATH ; InstallAllUsers=0 = no admin needed
     $proc = Start-Process -FilePath $pyExe -ArgumentList @(
         '/quiet', 'InstallAllUsers=0', 'PrependPath=1',
         'Include_pip=1', 'Include_launcher=1', 'Include_test=0'
     ) -Wait -PassThru
     Remove-Item $pyExe -ErrorAction SilentlyContinue
-    # 0 = ok ; 3010 = ok pero pide reiniciar. Cualquier otro = fallo real.
+    # 0 = ok ; 3010 = ok but wants a reboot. Anything else = real failure.
     if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
-        Bail "El instalador de Python devolvio exit $($proc.ExitCode). Instala manual desde https://www.python.org/downloads/ (marca 'Add Python to PATH') y reintenta."
+        Bail "Python installer returned exit $($proc.ExitCode). Install it manually from https://www.python.org/downloads/ (check 'Add Python to PATH') and re-run."
     }
     Refresh-Path
     Start-Sleep -Seconds 2
@@ -141,12 +159,23 @@ $pyInfo = Find-RealPython
 
 if (-not $pyInfo) {
     Write-Host ""
-    Warn "Python 3.10+ no encontrado - lo instalo automaticamente (sin preguntar)."
-    $pyInfo = Install-Python312
-    if (-not $pyInfo) {
-        Bail "Python se instalo pero todavia no aparece en PATH. Cerra y reabri PowerShell, despues corre de nuevo: iwr -useb https://loud.codes/install.ps1 | iex"
+    Warn "Python 3.10+ was not found on this system."
+    Write-Host "      LOUD needs Python to run. I can install Python 3.12 for you." -ForegroundColor Gray
+    if (Ask-YesNo "Install Python 3.12 now and continue?" $true) {
+        $pyInfo = Install-Python312
+        if (-not $pyInfo) {
+            Bail "Python was installed but is not on PATH yet. Close and reopen PowerShell, then re-run: iwr -useb https://loud.codes/install.ps1 | iex"
+        }
+        Ok "Python installed"
+    } else {
+        Write-Host ""
+        Write-Host "  No problem. Install Python 3.10+ yourself, then re-run LOUD's installer:" -ForegroundColor Gray
+        Write-Host "    1) Download:  https://www.python.org/downloads/" -ForegroundColor Cyan
+        Write-Host "       (tick 'Add Python to PATH' during setup)" -ForegroundColor DarkGray
+        Write-Host "    2) Re-run:    iwr -useb https://loud.codes/install.ps1 | iex" -ForegroundColor Cyan
+        Write-Host ""
+        exit 0
     }
-    Ok "Python instalado correctamente"
 }
 
 Ok "$($pyInfo.version)"
@@ -160,7 +189,7 @@ Step "Install path: $InstallDir"
 # ───────────────────────── download ─────────────────────────
 $DownloadUrl = if ($env:LOUD_DOWNLOAD_URL) { $env:LOUD_DOWNLOAD_URL } else { "https://github.com/loud-codes/loud-cli/archive/refs/heads/main.zip" }
 $Zip = Join-Path $env:TEMP "loud.zip"
-Step "Downloading $DownloadUrl"
+Step "Downloading LOUD"
 Invoke-WebRequest -UseBasicParsing -Uri $DownloadUrl -OutFile $Zip
 Ok "downloaded"
 
@@ -194,70 +223,87 @@ $venvExit = Try-CreateVenv $pyInfo.cmd.Source $pyInfo.argPrefix
 if ($venvExit -ne 0) {
     $errTxt = ""
     if (Test-Path "$env:TEMP\loud-venv-err.txt") { $errTxt = Get-Content "$env:TEMP\loud-venv-err.txt" -Raw }
-    Warn "venv fallo con tu Python actual ($($pyInfo.version)). Error:"
+    Warn "venv creation failed with your current Python ($($pyInfo.version)). Error:"
     Write-Host "    $errTxt" -ForegroundColor DarkGray
-    # Si el Python es demasiado nuevo (3.14+) o vimos el error 'platform independent
-    # libraries', instalamos 3.12 estable AUTOMATICAMENTE (winget o descarga directa).
+    # If Python is too new (3.14+) or we saw the 'platform independent libraries'
+    # error, offer to install stable Python 3.12.
     $is_python_broken = ($pyInfo.version -match 'Python 3\.(1[4-9]|[2-9]\d)' -or $errTxt -match 'platform independent libraries')
     if ($is_python_broken) {
-        Warn "Tu Python esta roto o es demasiado nuevo. Instalo Python 3.12 (estable) ahora..."
-        $newPy = Install-Python312
-        if (-not $newPy) {
-            Bail "Python 3.12 instalado pero no se encuentra. Cerra PowerShell y reabri, despues corre: iwr -useb https://loud.codes/install.ps1 | iex"
+        Warn "Your Python is broken or too new for some packages."
+        if (Ask-YesNo "Install stable Python 3.12 and retry?" $true) {
+            $newPy = Install-Python312
+            if (-not $newPy) {
+                Bail "Python 3.12 was installed but is not on PATH yet. Close PowerShell, reopen it, then re-run: iwr -useb https://loud.codes/install.ps1 | iex"
+            }
+            $pyInfo = $newPy
+            Step "Retrying venv with $($pyInfo.version)"
+            $venvExit = Try-CreateVenv $pyInfo.cmd.Source $pyInfo.argPrefix
         }
-        $pyInfo = $newPy
-        Step "Reintentando venv con $($pyInfo.version)"
-        $venvExit = Try-CreateVenv $pyInfo.cmd.Source $pyInfo.argPrefix
     }
     if ($venvExit -ne 0) {
-        Bail "venv sigue fallando. Mostrame el output exacto y vemos."
+        Bail "venv creation still failing. Send me the exact output above and we'll sort it out."
     }
 }
 Ok "venv ready ($($pyInfo.version))"
 
-Step "Installing dependencies"
+Step "Installing core dependency (httpx)"
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
 
-# Core: httpx es OBLIGATORIO (sin esto loud no arranca). Reintenta una vez y verifica.
-& $VenvPython -m pip install --upgrade pip 2>$null
-& $VenvPython -m pip install --quiet httpx
+# Core: httpx is REQUIRED (LOUD won't start without it). --no-cache-dir avoids the
+# "Cache entry deserialization failed" warning from a corrupt pip cache. Verify + retry.
+& $VenvPython -m pip install --quiet --upgrade --no-cache-dir pip 2>$null
+& $VenvPython -m pip install --quiet --no-cache-dir httpx
 & $VenvPython -c "import httpx" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Warn "Primer intento de httpx fallo, reintentando sin cache..."
+    Warn "First httpx attempt failed, retrying..."
     & $VenvPython -m pip install --no-cache-dir httpx
     & $VenvPython -c "import httpx" 2>$null
     if ($LASTEXITCODE -ne 0) {
-        Bail "No se pudo instalar 'httpx' (dependencia core). Revisa tu conexion y reintenta: iwr -useb https://loud.codes/install.ps1 | iex"
+        Bail "Could not install 'httpx' (core dependency). Check your connection and re-run: iwr -useb https://loud.codes/install.ps1 | iex"
     }
 }
-Ok "httpx (core) installed"
+Ok "core ready - LOUD can run now"
 
-# Bundle completo GUI/voz/browser. NO es critico: si algo falla, loud igual corre,
-# asi que cada pieza va en su propio try/catch y NUNCA aborta la instalacion.
-if (-not $env:LOUD_SKIP_GUI) {
-  Step "Installing GUI / browser / voice bundle"
-  try {
-    & $VenvPython -m pip install --quiet playwright sounddevice numpy pyautogui pillow mss
-    Ok "playwright + voice + GUI deps installed"
-  } catch { Warn "bundle GUI/voz fallo parcialmente - podes reintentar luego con 'loud setup gui'" }
+# Optional toolkit (browser automation, web scraping, voice). It's NOT required:
+# LOUD runs fine without it. ~500 MB, so we ASK before installing (non-invasive).
+$wantToolkit = $false
+if ($env:LOUD_SKIP_TOOLKIT) {
+    $wantToolkit = $false
+} elseif ($env:LOUD_WITH_TOOLKIT) {
+    $wantToolkit = $true
+} else {
+    Write-Host ""
+    Write-Host "  Optional toolkit: browser automation + web scraping + voice (~500 MB)." -ForegroundColor Gray
+    Write-Host "  Not required - LOUD already works. You can also add it later with 'loud setup gui'." -ForegroundColor DarkGray
+    $wantToolkit = Ask-YesNo "Install the optional toolkit now?" $false
+}
 
-  Step "Installing Scrapling (scrape / scrape_stealth / scrape_dynamic)"
-  try {
-    & $VenvPython -m pip install --quiet "scrapling[fetchers]"
-    Ok "scrapling[fetchers] installed"
-  } catch { Warn "scrapling fallo - reintenta luego con 'loud setup gui'" }
+if ($wantToolkit) {
+    Step "Installing toolkit (this can take a few minutes)"
+    try {
+        & $VenvPython -m pip install --quiet --no-cache-dir playwright sounddevice numpy pyautogui pillow mss
+        Ok "browser + voice + GUI deps installed"
+    } catch { Warn "toolkit deps partially failed - retry later with 'loud setup gui'" }
 
-  Step "Downloading Chromium for playwright (~400 MB)"
-  try {
-    & $VenvPython -m playwright install chromium
-    Ok "chromium ready"
-  } catch {
-    Write-Host "  warn: chromium install hit an error - run 'loud setup gui' later to retry"
-  }
+    Step "Installing Scrapling (scrape / scrape_stealth / scrape_dynamic)"
+    try {
+        & $VenvPython -m pip install --quiet --no-cache-dir "scrapling[fetchers]"
+        Ok "scrapling[fetchers] installed"
+    } catch { Warn "scrapling failed - retry later with 'loud setup gui'" }
+
+    Step "Downloading Chromium for Playwright (~400 MB)"
+    try {
+        & $VenvPython -m playwright install chromium
+        Ok "chromium ready"
+    } catch {
+        Write-Host "  warn: chromium install hit an error - run 'loud setup gui' later to retry"
+    }
+} else {
+    Write-Host "  Skipped the optional toolkit. Add it anytime with: loud setup gui" -ForegroundColor DarkGray
 }
 
 # ───────────────────────── shim ─────────────────────────
-Step "Installing 'loud' command"
+Step "Installing the 'loud' command"
 $ShimCmd = Join-Path $BinDir "loud.cmd"
 $entry = (Join-Path $Src "cli\loud.py")
 $python = Join-Path $Venv "Scripts\python.exe"
@@ -267,7 +313,7 @@ Set-Content -Path $ShimCmd -Encoding ASCII -Value @"
 "@
 Ok "linked $ShimCmd"
 
-# PATH hint — lo agregamos automaticamente al PATH de usuario (sin pedir nada)
+# Add ~/.local/bin to the user PATH automatically.
 if (-not (($env:PATH -split ";") -contains $BinDir)) {
     try {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -275,25 +321,25 @@ if (-not (($env:PATH -split ";") -contains $BinDir)) {
             [Environment]::SetEnvironmentVariable('Path', "$userPath;$BinDir", 'User')
         }
         $env:Path = "$env:Path;$BinDir"
-        Ok "Agregue $BinDir a tu PATH de usuario"
+        Ok "added $BinDir to your user PATH"
     } catch {
-        Warn "$BinDir no esta en tu PATH. Agregalo manualmente con:"
+        Warn "$BinDir is not on your PATH. Add it manually with:"
         Write-Host "       [Environment]::SetEnvironmentVariable('Path', `$env:Path + ';$BinDir', 'User')" -ForegroundColor White
     }
 }
 
 Write-Host ""
-Write-Host "  [OK] LOUD instalado!" -ForegroundColor Green
+Write-Host "  [OK] LOUD installed!" -ForegroundColor Green
 Write-Host ""
 Write-Host "  ===================================================================" -ForegroundColor Yellow
-Write-Host "   IMPORTANTE: CERRA ESTA TERMINAL Y ABRI UNA NUEVA antes de usar LOUD." -ForegroundColor Yellow
-Write-Host "   (es para que tome el PATH y el Python recien instalado)" -ForegroundColor Yellow
+Write-Host "   IMPORTANT: CLOSE THIS TERMINAL AND OPEN A NEW ONE before using LOUD." -ForegroundColor Yellow
+Write-Host "   (so it picks up the updated PATH / freshly installed Python)" -ForegroundColor Yellow
 Write-Host "  ===================================================================" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  Despues, en la terminal nueva escribi:" -ForegroundColor Gray
-Write-Host "     loud login              " -NoNewline -ForegroundColor Green; Write-Host "# usuario + contrasena" -ForegroundColor DarkGray
-Write-Host "     loud `"hola`"             " -NoNewline -ForegroundColor Green; Write-Host "# one-shot" -ForegroundColor DarkGray
-Write-Host "     loud                    " -NoNewline -ForegroundColor Green; Write-Host "# REPL interactivo" -ForegroundColor DarkGray
+Write-Host "  Then, in the new terminal, run:" -ForegroundColor Gray
+Write-Host "     loud login              " -NoNewline -ForegroundColor Green; Write-Host "# username + password" -ForegroundColor DarkGray
+Write-Host "     loud `"hello`"            " -NoNewline -ForegroundColor Green; Write-Host "# one-shot" -ForegroundColor DarkGray
+Write-Host "     loud                    " -NoNewline -ForegroundColor Green; Write-Host "# interactive REPL" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Docs: https://loud.codes" -ForegroundColor Blue
 Write-Host ""
