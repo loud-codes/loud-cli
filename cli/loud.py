@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.8.7"
+__version__ = "1.9.0"
 
 # ───────────────────── Config ─────────────────────
 
@@ -62,6 +62,7 @@ DEFAULT_CONFIG = {
     "max_iterations": 200,   # correr hasta terminar la tarea, no abandonar a mitad de un proceso largo (el anti-loop corta repeticiones, así que no hay loop infinito)
     "permission_mode": "ask",      # ask | yolo | safe (safe = block destructive ops)
     "typewriter": True,
+    "lang": "en",                  # CLI language: "en" (default, primary) | "es" — switch live with /lang
     # Compute mode for chat inference:
     #   "cloud"  → talk to api.loud.codes (full brain, RAG, auto-nurture)
     #   "local"  → talk to local Ollama 127.0.0.1:11434 (zero network latency,
@@ -85,7 +86,9 @@ DEFAULT_CONFIG = {
 def load_config() -> dict:
     if CONFIG_FILE.exists():
         try:
-            return {**DEFAULT_CONFIG, **json.loads(CONFIG_FILE.read_text())}
+            cfg = {**DEFAULT_CONFIG, **json.loads(CONFIG_FILE.read_text())}
+            set_lang(cfg.get("lang", "en"))
+            return cfg
         except Exception:
             pass
     CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
@@ -94,6 +97,22 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+
+
+# ───────────────────── i18n (English primary, /lang to switch) ─────────────────────
+# The terminal is English-first. The user can switch to Spanish live with `/lang`.
+# Strings that the user actually reads go through t(en, es); everything else
+# (model-facing prompts, internal logs) stays in whatever it is.
+LANG = "en"
+
+
+def set_lang(lang: str) -> None:
+    global LANG
+    LANG = "es" if str(lang).lower().startswith("es") else "en"
+
+
+def t(en: str, es: str) -> str:
+    return es if LANG == "es" else en
 
 
 # ───────────────────── ANSI / brand ─────────────────────
@@ -3482,67 +3501,73 @@ def get_token() -> str:
 
 
 async def cmd_login(cfg: dict, identifier: str | None = None, password: str | None = None) -> bool:
-    """Login del CLI — EXCLUSIVO de usuarios LOUD Pro (de pago).
+    """Link the CLI to a LOUD account via a magic link (Pro only).
 
-    Pide usuario/email + contraseña y autentica contra el backend mandando el
-    header `X-Loud-Client: cli`. El server sólo acepta ese login para cuentas
-    Pro (o admin); los usuarios free reciben 402 y se los manda a upgradear en
-    loud.codes/plans. El chat web no manda ese header, así que los free siguen
-    entrando a la web normalmente."""
-    import getpass as _gp
+    No username or password is ever typed in the terminal. We open
+    loud.codes/link in the browser; the user signs in there, clicks Allow, and
+    the web shows a one-time pairing code. The user pastes that code here and we
+    exchange it for a long-lived token (POST /v1/auth/cli/exchange). Only Pro or
+    admin accounts can authorize a CLI link; free accounts get a 402."""
+    import webbrowser
 
-    cprint("\n  ┌─ LOUD login (terminal · exclusivo Pro) ──────────────", C.BRAND, bold=True)
-    if not identifier:
-        cprint("  │  Usuario o email: ", C.BRAND, bold=True, end="")
-        try:
-            identifier = input().strip()
-        except (EOFError, KeyboardInterrupt):
-            cprint("\n  · cancelado", C.YELLOW); return False
-    if not password:
-        try:
-            password = _gp.getpass("  │  Contraseña: ")
-        except (EOFError, KeyboardInterrupt):
-            cprint("\n  · cancelado", C.YELLOW); return False
-    if not identifier or not password:
-        cprint("  · faltó usuario o contraseña", C.YELLOW); return False
+    api = cfg["api_url"]
+    # Web base is the api host without the `api.` prefix (api.loud.codes → loud.codes).
+    web = api.replace("//api.", "//") if "//api." in api else "https://loud.codes"
+    link = f"{web}/link"
 
+    cprint("\n  ┌─ Link LOUD (terminal · Pro only) ─────────────────────", C.BRAND, bold=True)
+    cprint("  │  No password needed here — authorize from your browser:", C.GRAY)
+    cprint(f"  │  -> {link}", C.BRAND, bold=True)
+    cprint("  │  Sign in, click Allow, then copy the pairing code.", C.GRAY)
+    cprint("  └───────────────────────────────────────────────────────", C.BRAND)
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(
-                f"{cfg['api_url']}/v1/auth/login",
-                json={"identifier": identifier, "password": password},
-                headers={"X-Loud-Client": "cli"},
-            )
-    except Exception as e:
-        cprint(f"  · error de red: {e}", C.RED); return False
+        webbrowser.open(link)
+    except Exception:
+        pass
 
-    if r.status_code == 402:
-        cprint("  └──────────────────────────────────────────────────────", C.BRAND)
-        cprint("\n  ✦ El CLI por terminal es exclusivo de LOUD Pro.", C.YELLOW, bold=True)
-        cprint("    Te da loud-pro + loud-ultra, tokens y desarrollo ilimitados.", C.GRAY)
-        cprint("    Activá tu plan acá:", C.GRAY)
-        cprint("      https://loud.codes/plans", C.BRAND, bold=True)
-        return False
-    if r.status_code != 200:
+    for _ in range(5):
+        try:
+            cprint("\n  Pairing code (paste it here): ", C.BRAND, bold=True, end="")
+            code = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            cprint("\n  · cancelled", C.YELLOW); return False
+        if not code:
+            cprint("  · open the link, click Allow, then paste the code.", C.YELLOW)
+            continue
+
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.post(
+                    f"{api}/v1/auth/cli/exchange",
+                    json={"code": code},
+                    headers={"X-Loud-Client": "cli"},
+                )
+        except Exception as e:
+            cprint(f"  · network error: {e}", C.RED); return False
+
+        if r.status_code == 200:
+            data = r.json()
+            save_auth({"token": data["token"], "user": data["user"], "api_url": api})
+            u = data["user"]
+            cprint(f"  ✓ linked as {u.get('username') or u['email']} ({u['role']}) · LOUD Pro", C.GREEN)
+            return True
+        if r.status_code == 402:
+            cprint("\n  ✦ The terminal CLI is part of LOUD Pro.", C.YELLOW, bold=True)
+            cprint("    Activate your plan at:", C.GRAY)
+            cprint("      https://loud.codes/plans", C.BRAND, bold=True)
+            return False
+        # 400 → invalid / expired / already-used code: let the user retry.
         try:    detail = r.json().get("detail", r.text[:200])
         except Exception: detail = r.text[:200]
-        cprint(f"  · login falló ({r.status_code}): {detail}", C.RED); return False
+        cprint(f"  · {detail}", C.YELLOW)
 
-    data = r.json()
-    save_auth({"token": data["token"], "user": data["user"], "api_url": cfg["api_url"]})
-    u = data["user"]
-    cprint("  └──────────────────────────────────────────────────────", C.BRAND)
-    cprint(f"  ✓ entraste como {u.get('username') or u['email']} ({u['role']}) · LOUD Pro", C.GREEN)
-    return True
-
-    sys.stdout.write("\r" + " " * 60 + "\r")
-    cprint("  · login expiró (15 min). Corre `loud login` de nuevo.", C.RED)
+    cprint("  · too many attempts — run `loud login` again.", C.RED)
     return False
 
 
 async def cmd_logout() -> None:
     clear_auth()
-    cprint("  ✓ sesión cerrada", C.GREEN)
+    cprint(t("  ✓ signed out", "  ✓ sesión cerrada"), C.GREEN)
 
 
 async def cmd_connect(cfg: dict) -> int:
@@ -5002,8 +5027,40 @@ def render_banner(cfg: dict) -> str:
     return "".join(out)
 
 
-SLASH_HELP = """\
+SLASH_HELP_EN = """\
+/help               show this help
+/lang               switch language (English / Espanol)
+/reset              clear the current session history
+/model NAME         change model (current: {model})
+                    · loud-go (qwen 3b · fast)
+                    · loud-pro (qwen 7b · balanced)
+                    · loud-ultra (qwen 14b · deep)
+                    · loud-2.0 (qwen 32b · LOUD 2.0 GPU only)
+                    · loud-eye (qwen2-vl · images/screenshots)
+/tools              list the tools the agent can call
+/connect            ⚡ LOUD Connect — plug in any AI engine (OpenAI-compatible)
+/skills [filter]    list installed skills (~/.loud/skills/<n>/SKILL.md)
+/skill NAME         load and print a skill
+/permissions        show/change the permission mode (ask/yolo/safe)
+/mode MODE          inference engine: cloud · local · auto
+                    · cloud = api.loud.codes (full brain + RAG)
+                    · local = ollama on YOUR machine (zero latency, no RAG)
+                    · auto  = local if up, otherwise cloud
+/setup local        install Ollama + download the local model
+/save FILE          export the current conversation to a .md file
+/open FILE          import a previous conversation (.md or .json)
+/cwd                print the current directory
+/login              sign in (opens the browser to link this terminal)
+/logout             sign out
+/whoami             show the signed-in user
+/update             update the CLI to the latest version (same as `loud update`)
+/version            current CLI version
+/exit               quit
+"""
+
+SLASH_HELP_ES = """\
 /help               muestra esta ayuda
+/lang               cambia el idioma (English / Espanol)
 /reset              borra el historial de la sesión actual
 /model NAME         cambia modelo (actual: {model})
                     · loud-go (qwen 3b · rápido)
@@ -5024,7 +5081,7 @@ SLASH_HELP = """\
 /save FILE          exporta la conversación actual a un archivo .md
 /open FILE          importa una conversación previa (.md o .json) al chat actual
 /cwd                imprime el directorio actual
-/login              inicia sesión (abre browser device-flow)
+/login              inicia sesión (abre el navegador para vincular la terminal)
 /logout             cierra sesión actual
 /whoami             muestra el usuario logueado
 /update             actualiza el CLI a la última versión (igual que `loud update`)
@@ -5033,8 +5090,12 @@ SLASH_HELP = """\
 """
 
 
+def slash_help() -> str:
+    return SLASH_HELP_ES if LANG == "es" else SLASH_HELP_EN
+
+
 SLASH_COMMANDS = {
-    "/exit", "/quit", "/help", "/reset", "/model", "/tools",
+    "/exit", "/quit", "/help", "/lang", "/reset", "/model", "/tools",
     "/permissions", "/mode", "/setup", "/brain", "/cwd",
     "/login", "/logout", "/whoami", "/version", "/update",
     "/save", "/open", "/skills", "/skill", "/connect",
@@ -5115,8 +5176,9 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
         is_slash_cmd = user_text.startswith("/") and first_token in SLASH_COMMANDS
         if user_text.startswith("/") and not is_slash_cmd:
             if not _looks_like_filesystem_path(user_text):
-                cprint(f"  · comando desconocido: {first_token}", C.RED)
-                cprint(f"  · comandos: {' · '.join(sorted(SLASH_COMMANDS))}", C.GRAY)
+                cprint(t(f"  · unknown command: {first_token}", f"  · comando desconocido: {first_token}"), C.RED)
+                cprint(t(f"  · commands: {' · '.join(sorted(SLASH_COMMANDS))}",
+                         f"  · comandos: {' · '.join(sorted(SLASH_COMMANDS))}"), C.GRAY)
                 continue
             # else: fall through, treat the pasted path as chat input
         if is_slash_cmd:
@@ -5125,7 +5187,18 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
             if cmd == "/exit" or cmd == "/quit":
                 break
             elif cmd == "/help":
-                cprint(SLASH_HELP.format(model=cfg["model"]), C.BRAND)
+                cprint(slash_help().format(model=cfg["model"]), C.BRAND)
+            elif cmd == "/lang":
+                choice = select_option(
+                    t("Choose CLI language:", "Elegí el idioma del CLI:"),
+                    ["English", "Espanol"],
+                    default=(1 if LANG == "es" else 0),
+                )
+                new_lang = "es" if str(choice).lower().startswith("esp") else "en"
+                cfg["lang"] = new_lang
+                set_lang(new_lang)
+                save_config(cfg)
+                cprint(t(f"  · language set to English", f"  · idioma cambiado a Español"), C.GREEN)
             elif cmd == "/reset":
                 reset_session()
                 _TODOS.clear()
@@ -5203,13 +5276,14 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
                 else:
                     cprint("  · uso: /setup local", C.YELLOW)
             elif cmd == "/brain":
-                cprint("  · brain no está disponible desde terminal — esa función es solo para la web admin.", C.YELLOW)
+                cprint(t("  · brain is not available from the terminal — that feature is web-admin only.",
+                         "  · brain no está disponible desde terminal — esa función es solo para la web admin."), C.YELLOW)
             elif cmd == "/cwd":
                 cprint(f"  · {Path.cwd()}", C.YELLOW)
             elif cmd == "/login":
                 ok = await cmd_login(cfg)
                 if ok:
-                    cprint("  · ya puedes empezar a chatear", C.GRAY)
+                    cprint(t("  · you can start chatting now", "  · ya puedes empezar a chatear"), C.GRAY)
             elif cmd == "/logout":
                 await cmd_logout()
             elif cmd == "/whoami":
@@ -5248,9 +5322,11 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
         # want to chat.
         if not get_token():
             cprint("", "")
-            cprint("  ┌─ no estás logueado", C.YELLOW, bold=True)
-            cprint(f"  │  Escribe {C.BOLD}{C.BRAND}/login{C.RESET}{C.YELLOW} para entrar (abre tu navegador).", C.YELLOW)
-            cprint( "  │  Sin sesión no puedo procesar prompts.", C.YELLOW)
+            cprint(t("  ┌─ not signed in", "  ┌─ no estás logueado"), C.YELLOW, bold=True)
+            cprint(t(f"  │  Type {C.BOLD}{C.BRAND}/login{C.RESET}{C.YELLOW} to sign in (opens your browser).",
+                     f"  │  Escribe {C.BOLD}{C.BRAND}/login{C.RESET}{C.YELLOW} para entrar (abre tu navegador)."), C.YELLOW)
+            cprint(t("  │  I can't process prompts without a session.",
+                     "  │  Sin sesión no puedo procesar prompts."), C.YELLOW)
             cprint( "  └─", C.YELLOW)
             continue
 
