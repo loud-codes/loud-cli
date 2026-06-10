@@ -218,33 +218,51 @@ function Try-CreateVenv($pyCmd, $argPrefix) {
     return $proc.ExitCode
 }
 
-Step "Creating isolated Python env"
-$venvExit = Try-CreateVenv $pyInfo.cmd.Source $pyInfo.argPrefix
-if ($venvExit -ne 0) {
-    $errTxt = ""
-    if (Test-Path "$env:TEMP\loud-venv-err.txt") { $errTxt = Get-Content "$env:TEMP\loud-venv-err.txt" -Raw }
-    Warn "venv creation failed with your current Python ($($pyInfo.version)). Error:"
-    Write-Host "    $errTxt" -ForegroundColor DarkGray
-    # If Python is too new (3.14+) or we saw the 'platform independent libraries'
-    # error, offer to install stable Python 3.12.
-    $is_python_broken = ($pyInfo.version -match 'Python 3\.(1[4-9]|[2-9]\d)' -or $errTxt -match 'platform independent libraries')
-    if ($is_python_broken) {
-        Warn "Your Python is broken or too new for some packages."
-        if (Ask-YesNo "Install stable Python 3.12 and retry?" $true) {
-            $newPy = Install-Python312
-            if (-not $newPy) {
-                Bail "Python 3.12 was installed but is not on PATH yet. Close PowerShell, reopen it, then re-run: iwr -useb https://loud.codes/install.ps1 | iex"
+Step "Setting up isolated Python env"
+$VenvPythonExe = Join-Path $Venv "Scripts\python.exe"
+$venvExit = 0
+$reusedVenv = $false
+# If a working venv already exists, REUSE it instead of wiping. On Windows you
+# cannot delete python.exe while it's running (an open `loud`, or `loud update`
+# re-running this installer from inside loud) -> "Permission denied". Reusing
+# sidesteps that completely: we keep the env and just refresh the code.
+if (Test-Path $VenvPythonExe) {
+    try { & $VenvPythonExe -c "import sys" 2>$null; $reusedVenv = ($LASTEXITCODE -eq 0) } catch { $reusedVenv = $false }
+}
+if ($reusedVenv) {
+    Ok "Reusing existing Python env (no rebuild needed)"
+} else {
+    $venvExit = Try-CreateVenv $pyInfo.cmd.Source $pyInfo.argPrefix
+    if ($venvExit -ne 0) {
+        $errTxt = ""
+        if (Test-Path "$env:TEMP\loud-venv-err.txt") { $errTxt = Get-Content "$env:TEMP\loud-venv-err.txt" -Raw }
+        # python.exe locked = a loud is still running. Say so plainly.
+        if ($errTxt -match 'Permission denied|being used|in use|Acceso denegado|Errno 13') {
+            Bail "Can't rebuild the env because LOUD is still running (python.exe is locked). Close every open 'loud' window, then re-run in a NEW terminal: iwr -useb https://loud.codes/install.ps1 | iex   (note: from v1.9.3 on, 'loud update' updates in place and never hits this)"
+        }
+        Warn "venv creation failed with your current Python ($($pyInfo.version)). Error:"
+        Write-Host "    $errTxt" -ForegroundColor DarkGray
+        # If Python is too new (3.14+) or we saw the 'platform independent
+        # libraries' error, offer to install stable Python 3.12.
+        $is_python_broken = ($pyInfo.version -match 'Python 3\.(1[4-9]|[2-9]\d)' -or $errTxt -match 'platform independent libraries')
+        if ($is_python_broken) {
+            Warn "Your Python is broken or too new for some packages."
+            if (Ask-YesNo "Install stable Python 3.12 and retry?" $true) {
+                $newPy = Install-Python312
+                if (-not $newPy) {
+                    Bail "Python 3.12 was installed but is not on PATH yet. Close PowerShell, reopen it, then re-run: iwr -useb https://loud.codes/install.ps1 | iex"
+                }
+                $pyInfo = $newPy
+                Step "Retrying venv with $($pyInfo.version)"
+                $venvExit = Try-CreateVenv $pyInfo.cmd.Source $pyInfo.argPrefix
             }
-            $pyInfo = $newPy
-            Step "Retrying venv with $($pyInfo.version)"
-            $venvExit = Try-CreateVenv $pyInfo.cmd.Source $pyInfo.argPrefix
+        }
+        if ($venvExit -ne 0) {
+            Bail "venv creation still failing. Send me the exact output above and we'll sort it out."
         }
     }
-    if ($venvExit -ne 0) {
-        Bail "venv creation still failing. Send me the exact output above and we'll sort it out."
-    }
 }
-Ok "venv ready ($($pyInfo.version))"
+Ok "Python env ready ($($pyInfo.version))"
 
 Step "Installing core dependency (httpx)"
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
