@@ -273,6 +273,15 @@ $env:PIP_NO_CACHE_DIR = "1"
 $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 $env:PYTHONWARNINGS = "ignore"
 
+# A reused venv from a half-broken update can be missing pip entirely. Bootstrap
+# it with ensurepip (ships with Python) so the httpx install below never fails
+# with "No module named pip".
+& $VenvPython -c "import pip" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Step "Restoring pip in the env"
+    & $VenvPython -m ensurepip --upgrade 2>$null
+}
+
 # Core: httpx is REQUIRED (LOUD won't start without it). Verify the import + retry once.
 & $VenvPython -m pip install --quiet --no-cache-dir --no-warn-script-location httpx
 & $VenvPython -c "import httpx" 2>$null

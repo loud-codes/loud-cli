@@ -40,11 +40,16 @@ try:
     import httpx
 except ModuleNotFoundError:
     # Self-heal: un venv a medias (ej: un update interrumpido en Windows que dejó
-    # el venv sin site-packages) puede quedar SIN httpx. En vez de crashear con
-    # ModuleNotFoundError, instalamos httpx en ESTE intérprete (que ES el venv) y
-    # reintentamos. Así `loud` nunca muere por una dependencia core faltante.
+    # el venv sin site-packages) puede quedar SIN httpx — y a veces SIN pip. En
+    # vez de crashear, bootstrapeamos pip (ensurepip) si falta e instalamos httpx
+    # en ESTE intérprete (que ES el venv) y reintentamos. Así `loud` nunca muere
+    # por una dependencia core faltante.
     print("  · LOUD: falta httpx — lo instalo automaticamente…", flush=True)
     try:
+        try:
+            import pip  # noqa: F401
+        except Exception:
+            subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"], check=False)
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir", "httpx"],
             check=True,
@@ -52,10 +57,10 @@ except ModuleNotFoundError:
         import httpx
     except Exception as _e:
         print(f"  · no pude instalar httpx solo: {_e}", flush=True)
-        print(f'    Arreglalo a mano:  "{sys.executable}" -m pip install httpx', flush=True)
+        print(f'    Arreglalo a mano:  "{sys.executable}" -m ensurepip --upgrade ; "{sys.executable}" -m pip install httpx', flush=True)
         raise SystemExit(1)
 
-__version__ = "1.9.5"
+__version__ = "1.9.6"
 
 # ───────────────────── Config ─────────────────────
 
