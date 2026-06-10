@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.9.3"
+__version__ = "1.9.4"
 
 # ───────────────────── Config ─────────────────────
 
@@ -2189,6 +2189,130 @@ async def tool_skill_view(name: str) -> str:
     return f"[SKILL: {key}] {meta.get('description', '')}\n[dir: {path.parent}]\n\n{body}"
 
 
+# ───────────────────── Memorias — recuerdo SELECTIVO (estilo Claude Code) ─────────────────────
+# LOUD guarda memorias DURADERAS a propósito (NO arrastra sesiones enteras ni
+# continúa temas viejos solo). Cada memoria es un .md con frontmatter en
+# ~/.loud/memory/, indexado en MEMORY.md. El índice se inyecta en el system
+# prompt cada sesión; el agente decide cuándo guardar con `remember`.
+LOUD_MEMORY_DIR = LOUD_DIR / "memory"
+LOUD_MEMORY_INDEX = LOUD_MEMORY_DIR / "MEMORY.md"
+
+
+def _mem_slug(title: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (title or "").strip().lower()).strip("-")
+    return (s or "memory")[:60]
+
+
+def _scan_memories() -> dict:
+    """name → (meta, body, path) para cada ~/.loud/memory/*.md (excepto el índice)."""
+    out: dict = {}
+    if not LOUD_MEMORY_DIR.exists():
+        return out
+    for mf in sorted(LOUD_MEMORY_DIR.glob("*.md")):
+        if mf.name == "MEMORY.md":
+            continue
+        try:
+            raw = mf.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        meta: dict = {}
+        body = raw
+        m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", raw, re.DOTALL)
+        if m:
+            body = m.group(2)
+            for line in m.group(1).splitlines():
+                if ":" in line and not line.lstrip().startswith("#"):
+                    k, v = line.split(":", 1)
+                    meta[k.strip()] = v.strip().strip('"').strip("'")
+        name = (meta.get("name") or mf.stem).strip()
+        out[name] = (meta, body.strip(), mf)
+    return out
+
+
+def _memory_index_text(limit: int = 40) -> str:
+    """Una línea por memoria (name — description) para el system prompt."""
+    mems = _scan_memories()
+    if not mems:
+        return ""
+    rows = []
+    for name, (meta, body, _p) in sorted(mems.items()):
+        desc = meta.get("description") or (body.splitlines()[0] if body else "")
+        rows.append(f"  · {name} — {shorten(desc, 100)}")
+        if len(rows) >= limit:
+            break
+    return "\n".join(rows)
+
+
+def _rebuild_memory_index() -> None:
+    """Re-escribe MEMORY.md (índice human-readable) desde los archivos."""
+    mems = _scan_memories()
+    lines = ["# LOUD memory index", ""]
+    for name, (meta, body, _p) in sorted(mems.items()):
+        desc = meta.get("description") or (body.splitlines()[0] if body else "")
+        lines.append(f"- [{name}]({name}.md) — {shorten(desc, 120)}")
+    try:
+        LOUD_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        LOUD_MEMORY_INDEX.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+async def tool_remember(title: str, content: str, description: str = "", type: str = "project") -> str:
+    """Guardá una memoria DURADERA (algo a recordar entre sesiones: preferencia del
+    usuario, dato/decisión del proyecto, algo que te pidió recordar). NO guardes
+    trivialidades ni cosas de un solo turno. Si ya existe una con el mismo título
+    se actualiza. type: user|project|preference|reference."""
+    if not (title or "").strip() or not (content or "").strip():
+        return "ERROR: remember necesita title y content."
+    slug = _mem_slug(title)
+    try:
+        LOUD_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        path = LOUD_MEMORY_DIR / f"{slug}.md"
+        first_line = content.strip().splitlines()[0] if content.strip() else ""
+        desc = (description or "").strip() or shorten(first_line, 100)
+        fm = f"---\nname: {slug}\ndescription: {desc}\ntype: {type}\n---\n\n"
+        path.write_text(fm + content.strip() + "\n", encoding="utf-8")
+    except Exception as e:
+        return f"ERROR guardando memoria: {e}"
+    _rebuild_memory_index()
+    return f"✓ memoria guardada: {slug} ({type}) → ~/.loud/memory/{slug}.md"
+
+
+async def tool_recall(query: str = "") -> str:
+    """Recuperá memorias guardadas. Sin query → lista el índice. Con query →
+    devuelve el contenido completo de las que matcheen (nombre/descripción/cuerpo)."""
+    mems = _scan_memories()
+    if not mems:
+        return "No hay memorias guardadas todavía. Guardá una con remember(title, content)."
+    q = (query or "").strip().lower()
+    if not q:
+        return "Memorias guardadas (recall(query) para el detalle):\n" + _memory_index_text(limit=100)
+    hits = []
+    for name, (meta, body, _p) in sorted(mems.items()):
+        blob = f"{name} {meta.get('description','')} {body}".lower()
+        if q in blob:
+            hits.append(f"[{name}] {meta.get('description','')}\n{body}")
+    if not hits:
+        return f"Ninguna memoria matchea '{query}'. Índice:\n" + _memory_index_text(limit=100)
+    return "\n\n———\n\n".join(hits[:8])
+
+
+async def tool_forget(name: str) -> str:
+    """Borrá una memoria por nombre cuando quedó obsoleta o estaba mal."""
+    mems = _scan_memories()
+    key = (name or "").strip().lstrip("/")
+    entry = mems.get(key) or mems.get(_mem_slug(key))
+    if not entry:
+        return f"No existe la memoria '{name}'. Disponibles: {', '.join(sorted(mems)) or '(ninguna)'}"
+    _meta, _body, path = entry
+    try:
+        path.unlink()
+    except Exception as e:
+        return f"ERROR borrando: {e}"
+    _rebuild_memory_index()
+    return f"✓ memoria borrada: {key}"
+
+
 # ── Compactación de contexto: SÓLO cuando el historial pasa el umbral (tareas
 #    largas). En lo cotidiano nunca se dispara — overhead cero. ──
 
@@ -2335,15 +2459,28 @@ async def _maybe_compact(cfg: dict, messages: list[dict]) -> None:
 
 
 def system_prompt_with_skills() -> str:
-    """STATIC_SYSTEM_PROMPT + catálogo de skills instaladas (si hay)."""
+    """STATIC_SYSTEM_PROMPT + memorias guardadas + catálogo de skills."""
+    out = STATIC_SYSTEM_PROMPT
+    # Memoria selectiva: el agente recuerda a PROPÓSITO, no arrastra sesiones.
+    out += ("\n\n# MEMORIA (recuerdo SELECTIVO — no arrastres sesiones enteras)\n"
+            "Empezás cada sesión LIMPIO. Guardás memorias DURADERAS a propósito con "
+            "`remember(title, content)`: preferencias del usuario, datos/decisiones del "
+            "proyecto, cosas que te pidió recordar. NO guardes trivialidades ni detalles "
+            "de un solo turno. Para traer algo guardado usá `recall(query)`; si quedó mal, "
+            "`forget(name)`. REGLA: NO continúes temas viejos ni referencies prompts "
+            "anteriores salvo que el usuario lo pida explícitamente, o que una memoria "
+            "guardada sea CLARAMENTE relevante al pedido actual. Si no aplica, ignorá las memorias.")
+    idx = _memory_index_text()
+    if idx:
+        out += "\n\nMemorias guardadas (usá `recall` para ver el detalle):\n" + idx
+    # Skills
     sk = get_skills()
-    if not sk:
-        return STATIC_SYSTEM_PROMPT
-    cat = "\n".join(f"  · {n} — {m.get('description', '')}" for n, (m, _b, _p) in sorted(sk.items()))
-    return (STATIC_SYSTEM_PROMPT +
-            "\n\n# SKILLS INSTALADAS (cargables on-demand SÓLO si son relevantes)\n"
-            "El usuario instaló skills (paquetes de instrucciones). Si una aplica al pedido, "
-            "cargala con `skill_view(name)` y seguí sus pasos. Si ninguna aplica, ignoralas.\n" + cat)
+    if sk:
+        cat = "\n".join(f"  · {n} — {m.get('description', '')}" for n, (m, _b, _p) in sorted(sk.items()))
+        out += ("\n\n# SKILLS INSTALADAS (cargables on-demand SÓLO si son relevantes)\n"
+                "El usuario instaló skills (paquetes de instrucciones). Si una aplica al pedido, "
+                "cargala con `skill_view(name)` y seguí sus pasos. Si ninguna aplica, ignoralas.\n" + cat)
+    return out
 
 
 # ───────────────────── Sub-agentes — nativo LOUD ─────────────────────
@@ -2475,6 +2612,30 @@ TOOLS_SCHEMA = [
     {"type": "function", "function": {
         "name": "skill_view",
         "description": "Load the full content of an installed skill to follow its instructions. Use only when a listed skill is relevant to the task.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+        }, "required": ["name"]},
+    }},
+    {"type": "function", "function": {
+        "name": "remember",
+        "description": "Save a DURABLE memory to recall in future sessions (a user preference, a project fact, a decision, something they asked you to remember). Save deliberately — NOT trivia, NOT one-off chat details. If a memory with the same title exists it's updated. Use when you learn something genuinely worth keeping.",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string", "description": "Short title (becomes the memory's name)."},
+            "content": {"type": "string", "description": "The fact to remember, in full."},
+            "description": {"type": "string", "description": "One-line summary used for recall relevance."},
+            "type": {"type": "string", "enum": ["user", "project", "preference", "reference"]},
+        }, "required": ["title", "content"]},
+    }},
+    {"type": "function", "function": {
+        "name": "recall",
+        "description": "Retrieve saved memories. No query lists the index; a query returns the matching memories' full content. Call when the user references past context or you need something you previously learned.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Optional search terms."},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "forget",
+        "description": "Delete a saved memory by name when it is wrong or obsolete.",
         "parameters": {"type": "object", "properties": {
             "name": {"type": "string"},
         }, "required": ["name"]},
@@ -2900,6 +3061,9 @@ TOOL_FNS = {
     "todo":               tool_todo,
     "skills_list":        tool_skills_list,
     "skill_view":         tool_skill_view,
+    "remember":           tool_remember,
+    "recall":             tool_recall,
+    "forget":             tool_forget,
     # ── GUI / browser / voice (opt-in via `loud setup gui`) ──
     "apps_list":          tool_apps_list,
     "app_open":           tool_app_open,
