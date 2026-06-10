@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.9.1"
+__version__ = "1.9.2"
 
 # ───────────────────── Config ─────────────────────
 
@@ -4548,9 +4548,13 @@ class LoadingSpinner:
     def set_label(self, label: str) -> None:
         self._label = label
 
-    def _drain_keys(self) -> None:
+    def _drain_keys(self, silent: bool = False) -> None:
         """Lee las teclas que el usuario tipeó (cbreak, no bloqueante) y arma el
-        buffer; cada Enter encola la línea como un task pendiente."""
+        buffer; cada Enter encola la línea como un task pendiente.
+
+        silent=True → se usa MIENTRAS la respuesta streamea: captura las teclas
+        sin eco y sin imprimir nada, así lo que tipeás NUNCA cae sobre el texto
+        de la respuesta (solo se encola para el próximo turno)."""
         global _input_buffer
         if not _is_foreground():
             return
@@ -4564,7 +4568,8 @@ class LoadingSpinner:
                         with _iq_lock:
                             _input_queue.append(line)
                         # subí el "en cola" por encima de la caja de input
-                        sys.stdout.write("\r\033[2K  " + C.GRAY + "▸ en cola: " + shorten(line, 80) + C.RESET + "\n\033[2K")
+                        if not silent:
+                            sys.stdout.write("\r\033[2K  " + C.GRAY + "▸ en cola: " + shorten(line, 80) + C.RESET + "\n\033[2K")
                 elif ch in ("\x7f", "\b"):
                     _input_buffer = _input_buffer[:-1]
                 elif ch == "\x03":  # Ctrl+C
@@ -4606,7 +4611,9 @@ class LoadingSpinner:
             else:
                 sys.stdout.write("\r\033[2K")
             sys.stdout.flush()
-            _spinner_exit_raw()   # seguridad: restaurar el terminal pase lo que pase
+            # OJO: NO restauramos raw acá. Lo maneja stop(): así, cuando empieza a
+            # streamear la respuesta, el spinner para pero el terminal SIGUE en
+            # no-echo, y lo que tipeás no se imprime sobre el texto de la respuesta.
 
     def start(self, label: str | None = None) -> None:
         if label:
@@ -4618,12 +4625,17 @@ class LoadingSpinner:
         _spinner_enter_raw()
         self._task = asyncio.create_task(self._loop())
 
-    async def stop(self) -> None:
+    async def stop(self, keep_raw: bool = False) -> None:
         self._stop = True
         if self._task:
             try: await self._task
             except Exception: pass
             self._task = None
+        if keep_raw:
+            # Frená la animación pero mantené el terminal en no-echo: la respuesta
+            # va a streamear ahora y queremos que lo que el usuario tipee NO se
+            # imprima sobre el texto (se captura en silencio y se encola).
+            return
         _spinner_exit_raw()
         _pump_pause.clear()
 
@@ -4758,7 +4770,10 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                 chunk = (event.get("message") or {}).get("content", "")
                 if chunk:
                     if not full_text:
-                        await spinner.stop()
+                        # keep_raw: la animación para pero el terminal QUEDA en
+                        # no-echo durante todo el stream, así lo que tipees no se
+                        # imprime sobre la respuesta (se encola en silencio).
+                        await spinner.stop(keep_raw=True)
                         cprint("", "")
                         stream_reset()
                     full_text += chunk
@@ -4769,6 +4784,10 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
                     else:
                         sys.stdout.write(scrub(chunk))
                         sys.stdout.flush()
+                    # Capturá en silencio lo que el usuario tipea MIENTRAS llega la
+                    # respuesta → se encola para el próximo turno, sin eco, sin
+                    # caer sobre el texto. (como Claude Code)
+                    spinner._drain_keys(silent=True)
         except StopAgent:
             await spinner.stop()
             cprint("\n  · detenido por el usuario", C.YELLOW)
