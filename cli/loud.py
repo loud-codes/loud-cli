@@ -38,7 +38,7 @@ from typing import Any, Iterable
 
 import httpx
 
-__version__ = "1.9.2"
+__version__ = "1.9.3"
 
 # ───────────────────── Config ─────────────────────
 
@@ -4888,14 +4888,16 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
             ))
             looks_like_plan = any(m in t for m in announce_markers)
             forced_nudges = sum(1 for m in messages if m.get("role") == "user" and m.get("_force_exec"))
-            # Nudge si: anuncia plan, O si el user pidió acción y el modelo solo respondió texto.
-            # El nudge se inyecta como mensaje del USER ("dale, ejecutá") en lugar de system
-            # adversarial — los modelos grandes responden al system reprimiéndose y pidiendo
-            # clarificación. Al usuario lo siguen sin discutir.
-            # LOUD no se detiene a mitad: mientras quede tarea, lo empujamos a
-            # seguir. El límite alto (30) + el anti-loop (corta repeticiones
-            # idénticas) + max_iterations=200 son la red real; no abandona solo.
-            if (looks_like_plan or user_action_intent) and forced_nudges < 30:
+            # Nudge SOLO cuando hay una señal CLARA de tarea inconclusa:
+            #   · el modelo ANUNCIÓ un plan ("voy a…", "let me…") pero NO ejecutó, o
+            #   · el user pidió acción y el modelo contestó un STUB cortito ("dale, lo hago")
+            #     sin entregar nada.
+            # Si el modelo dio una respuesta REAL y completa (texto sustancial), se
+            # ACEPTA como final — NO lo empujamos a seguir generando pavadas sin
+            # sentido (eso era el bug: respondía bien y igual seguía solo). Si necesita
+            # algo, el modelo puede parar y preguntar. Tope bajo (4) como red.
+            reply_is_stub = len(full_text.strip()) < 80
+            if (looks_like_plan or (user_action_intent and reply_is_stub)) and forced_nudges < 4:
                 messages.append({"role": "assistant", "content": full_text})
                 messages.append({
                     "role": "user",
