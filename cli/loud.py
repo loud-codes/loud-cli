@@ -60,7 +60,7 @@ except ModuleNotFoundError:
         print(f'    Arreglalo a mano:  "{sys.executable}" -m ensurepip --upgrade ; "{sys.executable}" -m pip install httpx', flush=True)
         raise SystemExit(1)
 
-__version__ = "1.9.6"
+__version__ = "1.9.7"
 
 # ───────────────────── Config ─────────────────────
 
@@ -193,6 +193,45 @@ def shorten(s: str, n: int) -> str:
 
 IS_WINDOWS = sys.platform.startswith("win")
 IS_MAC     = sys.platform == "darwin"
+
+
+def _init_windows_console() -> None:
+    """Make Windows render like macOS: enable ANSI/VT (so colors + box-drawing
+    work in PowerShell/conhost, not just Windows Terminal) and force UTF-8 output
+    (so the ─ │ ╭ box characters of the banner don't show as `?`). No-op elsewhere."""
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        ENABLE_VT = 0x0004
+        for hid in (-11, -12):  # STDOUT, STDERR
+            h = k.GetStdHandle(hid)
+            mode = ctypes.c_uint32()
+            if k.GetConsoleMode(h, ctypes.byref(mode)):
+                k.SetConsoleMode(h, mode.value | ENABLE_VT)
+        k.SetConsoleOutputCP(65001)
+        k.SetConsoleCP(65001)
+    except Exception:
+        pass
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _term_cols(default: int = 80) -> int:
+    try:
+        return shutil.get_terminal_size((default, 24)).columns
+    except Exception:
+        return default
+
+
+def _input_divider() -> str:
+    """Dim full-width rule that frames the input area (like Claude Code)."""
+    w = max(24, _term_cols() - 4)
+    return f"  {C.DIM}{'─' * w}{C.RESET}"
 
 
 def _shell_args(cmd: str) -> list[str]:
@@ -5404,10 +5443,12 @@ async def _repl_loop(cfg: dict, messages: list[dict], render_initial_banner: boo
         queued = _next_queued_input()
         if queued is not None:
             user_text = queued.strip()
-            cprint(f"loud❯ {user_text}  {C.GRAY}(de la cola){C.RESET}", C.BRAND, bold=True)
+            sys.stdout.write(_input_divider() + "\n")
+            cprint(f"  loud❯ {user_text}  {C.GRAY}{tr('(queued)', '(de la cola)')}{C.RESET}", C.BRAND, bold=True)
         else:
             try:
-                cprint("loud❯ ", C.BRAND, bold=True, end="")
+                sys.stdout.write(_input_divider() + "\n")
+                cprint("  loud❯ ", C.BRAND, bold=True, end="")
                 user_text = input().strip()
             except (EOFError, KeyboardInterrupt):
                 cprint("\n  · bye", C.GRAY)
@@ -5740,6 +5781,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    _init_windows_console()   # ANSI/VT + UTF-8 so Windows renders like macOS
     parser = argparse.ArgumentParser(
         prog="loud",
         description=f"LOUD CLI v{__version__} — terminal-first AI · loud.codes",
