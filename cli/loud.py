@@ -60,7 +60,7 @@ except ModuleNotFoundError:
         print(f'    Arreglalo a mano:  "{sys.executable}" -m ensurepip --upgrade ; "{sys.executable}" -m pip install httpx', flush=True)
         raise SystemExit(1)
 
-__version__ = "1.9.8"
+__version__ = "1.9.9"
 
 # ───────────────────── Config ─────────────────────
 
@@ -4818,12 +4818,22 @@ class LoadingSpinner:
             while not self._stop:
                 logo = _pulse_logo_frame(i)
                 frame = _SPINNER_FRAMES[i % len(_SPINNER_FRAMES)]
-                spin = f"  {logo} {C.BRAND}{frame}{C.RESET} {C.GRAY}{self._label}…{C.RESET}"
+                elapsed = int(i * 0.06)
+                clock = f"{elapsed//60}m {elapsed%60}s" if elapsed >= 60 else f"{elapsed}s"
+                spin = (f"  {logo} {C.BRAND}{frame}{C.RESET} {C.GRAY}{self._label}…{C.RESET}"
+                        f" {C.DIM}({clock} · esc para detener){C.RESET}")
                 if is_tty:
                     self._drain_keys()
-                    # spinner arriba + caja de input abajo (con cursor ▏)
-                    inp = f"  {C.GRAY}▸ {_input_buffer}{C.BRAND}▏{C.RESET}"
-                    sys.stdout.write("\r\033[2K" + spin + "\n\r\033[2K" + inp + "\033[A")
+                    # Caja de input fija ABAJO, ordenada y responsive (como Claude Code):
+                    #   línea 1 = spinner (lo que está haciendo)
+                    #   línea 2 = divisor (se recalcula con el ancho real del terminal)
+                    #   línea 3 = lo que estás escribiendo (blanco, con prompt loud❯ y cursor)
+                    cols = _term_cols()
+                    rule = f"  {C.DIM}{'─' * max(24, cols - 4)}{C.RESET}"
+                    avail = max(10, cols - 12)
+                    shown = _input_buffer if len(_input_buffer) <= avail else "…" + _input_buffer[-(avail - 1):]
+                    inp = f"  {C.BRAND}{C.BOLD}loud❯{C.RESET} {shown}{C.BRAND}▏{C.RESET}"
+                    sys.stdout.write("\r\033[2K" + spin + "\n\r\033[2K" + rule + "\n\r\033[2K" + inp + "\033[2A")
                 else:
                     sys.stdout.write("\r\033[2K" + spin)
                 sys.stdout.flush()
@@ -4831,8 +4841,8 @@ class LoadingSpinner:
                 await asyncio.sleep(0.06)
         finally:
             if is_tty:
-                # limpiar las 2 líneas (spinner + input)
-                sys.stdout.write("\r\033[2K\n\r\033[2K\033[A\r")
+                # limpiar las 3 líneas (spinner + divisor + input) y volver al tope
+                sys.stdout.write("\r\033[2K\n\r\033[2K\n\r\033[2K\033[2A\r")
             else:
                 sys.stdout.write("\r\033[2K")
             sys.stdout.flush()
