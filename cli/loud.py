@@ -60,7 +60,7 @@ except ModuleNotFoundError:
         print(f'    Arreglalo a mano:  "{sys.executable}" -m ensurepip --upgrade ; "{sys.executable}" -m pip install httpx', flush=True)
         raise SystemExit(1)
 
-__version__ = "1.9.7"
+__version__ = "1.9.8"
 
 # ───────────────────── Config ─────────────────────
 
@@ -5117,12 +5117,15 @@ async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
             #   · el modelo ANUNCIÓ un plan ("voy a…", "let me…") pero NO ejecutó, o
             #   · el user pidió acción y el modelo contestó un STUB cortito ("dale, lo hago")
             #     sin entregar nada.
-            # Si el modelo dio una respuesta REAL y completa (texto sustancial), se
-            # ACEPTA como final — NO lo empujamos a seguir generando pavadas sin
-            # sentido (eso era el bug: respondía bien y igual seguía solo). Si necesita
-            # algo, el modelo puede parar y preguntar. Tope bajo (4) como red.
+            # Si el modelo dio una respuesta REAL y completa (texto sustancial) DESPUÉS
+            # de haber ejecutado tools, se ACEPTA como final — NO lo empujamos a seguir
+            # generando pavadas (ese era el bug del chat). PERO si el user pidió una
+            # ACCIÓN y el modelo sólo HABLÓ sin ejecutar NI UNA tool en todo el turno,
+            # lo empujamos a EJECUTAR (no que describa y abandone la tarea — como yo:
+            # uso las tools, /tmp, y no dejo nada a mitad). Tope (8) como red.
             reply_is_stub = len(full_text.strip()) < 80
-            if (looks_like_plan or (user_action_intent and reply_is_stub)) and forced_nudges < 4:
+            no_tools_yet = len(tool_call_history) == 0
+            if (looks_like_plan or (user_action_intent and (reply_is_stub or no_tools_yet))) and forced_nudges < 8:
                 messages.append({"role": "assistant", "content": full_text})
                 messages.append({
                     "role": "user",
