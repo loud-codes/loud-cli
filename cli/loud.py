@@ -60,7 +60,7 @@ except ModuleNotFoundError:
         print(f'    Arreglalo a mano:  "{sys.executable}" -m ensurepip --upgrade ; "{sys.executable}" -m pip install httpx', flush=True)
         raise SystemExit(1)
 
-__version__ = "1.9.9"
+__version__ = "1.9.10"
 
 # ───────────────────── Config ─────────────────────
 
@@ -4761,6 +4761,16 @@ import atexit as _atexit
 _atexit.register(_spinner_exit_raw)   # red final: nunca dejar el terminal en raw
 
 
+def _restore_cursor() -> None:
+    try:
+        sys.stdout.write("\033[?25h"); sys.stdout.flush()   # nunca dejar el cursor oculto
+    except Exception:
+        pass
+
+
+_atexit.register(_restore_cursor)
+
+
 class LoadingSpinner:
     """Spinner que gira mientras el modelo genera. Caja de input fija ABAJO: el
     usuario puede seguir tipeando (lo ve en vivo) y cada Enter encola un task.
@@ -4858,6 +4868,11 @@ class LoadingSpinner:
         self._stop = False
         _pump_pause.set()      # el spinner es dueño del stdin mientras gira
         _spinner_enter_raw()
+        # Ocultá el cursor real del terminal mientras LOUD trabaja/streamea: si no,
+        # el bloque del cursor queda "arrastrándose" sobre el texto de la respuesta.
+        # El cursor visible lo dibujamos nosotros (▏) en la caja de input.
+        if _is_foreground():
+            sys.stdout.write("\033[?25l"); sys.stdout.flush()
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self, keep_raw: bool = False) -> None:
@@ -4867,12 +4882,13 @@ class LoadingSpinner:
             except Exception: pass
             self._task = None
         if keep_raw:
-            # Frená la animación pero mantené el terminal en no-echo: la respuesta
-            # va a streamear ahora y queremos que lo que el usuario tipee NO se
-            # imprima sobre el texto (se captura en silencio y se encola).
+            # Frená la animación pero mantené el terminal en no-echo (la respuesta
+            # va a streamear) Y el cursor oculto (sino el bloque pisa la respuesta).
             return
         _spinner_exit_raw()
         _pump_pause.clear()
+        if _is_foreground():
+            sys.stdout.write("\033[?25h"); sys.stdout.flush()   # restaurá el cursor para escribir
 
 
 async def run_turn(cfg: dict, messages: list[dict], user_text: str) -> str:
